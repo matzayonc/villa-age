@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
 use villa_age::history::{Action, ActionLog};
-use villa_age::trees::{MAX_TREES, Tree, TreeState, tree_base};
+use villa_age::trees::{MAX_TREES, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
 /// Builds a headless app on the default map and steps it for `sim_seconds` of simulated time.
@@ -199,6 +199,87 @@ fn character_runs_through_the_gathering_cycle() {
     assert!(matches!(state, TreeState::Delivered));
     let base = tree_base(transform);
     assert!(base.xz().length() < 3.0, "log left at {base}");
+}
+
+/// Runs one character toward one mature tree at `(8, 0)`, optionally with a delivered log lying
+/// across the path at `x = 4`. Returns the seconds spent walking before the first chop and the
+/// highest the character stood along the way.
+fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
+    let map = MapConfig::from_ron(
+        "(size: 20.0, characters: [(0.0, 0.0)], trees: [
+            (pos: (8.0, 0.0), maturity: 1.0),
+            (pos: (4.0, 0.0), maturity: 0.5),
+        ])",
+    )
+    .unwrap();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed,
+        map,
+        ..RunConfig::default()
+    });
+    app.update();
+
+    // Turn the sapling at x = 4 (too young to be a target) into a full-size log lying along Z
+    // across the character's path, or move it out of the way entirely.
+    let world = app.world_mut();
+    let (mut state, mut transform) = world
+        .query_filtered::<(&mut TreeState, &mut Transform), With<Tree>>()
+        .iter_mut(world)
+        .find(|(_, t)| tree_base(t).x < 6.0)
+        .unwrap();
+    if with_log {
+        *state = TreeState::Delivered;
+        *transform = Transform::from_xyz(4.0, TRUNK_RADIUS, 0.0)
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    } else {
+        *transform = Transform::from_xyz(-8.0, transform.translation.y, -8.0);
+    }
+
+    let mut max_y = f32::MIN;
+    for _ in 0..(10.0 * 60.0) as u32 {
+        app.update();
+        let world = app.world_mut();
+        let (transform, log) = world
+            .query_filtered::<(&Transform, &ActionLog), With<Character>>()
+            .single(world)
+            .unwrap();
+        if matches!(log.current().unwrap().action, Action::Chop { .. }) {
+            let at: Vec<f32> = log.iter().map(|e| e.at).collect();
+            assert_eq!(
+                log.iter().len(),
+                2,
+                "unexpected detour: {:?}",
+                log.iter().collect::<Vec<_>>()
+            );
+            return (at[1] - at[0], max_y);
+        }
+        max_y = max_y.max(transform.translation.y);
+    }
+    panic!("character never reached the tree (with_log = {with_log})");
+}
+
+#[test]
+fn characters_climb_over_logs_slowly() {
+    let (clear_time, clear_y) = walk_to_tree(5, false);
+    let (log_time, log_y) = walk_to_tree(5, true);
+
+    assert!(
+        log_time > clear_time + 0.3,
+        "crossing a log should cost time: {log_time}s with vs {clear_time}s without"
+    );
+    assert!(
+        log_time < clear_time + 3.0,
+        "climb took too long: {log_time}s"
+    );
+    assert!(
+        log_y > clear_y + 0.1,
+        "character never rose over the log: {log_y} vs {clear_y}"
+    );
+
+    // Back on the ground once past it.
+    let ground = clear_y;
+    assert!(ground > 0.0);
 }
 
 fn stats(app: &mut App) -> Vec<(f32, f32)> {

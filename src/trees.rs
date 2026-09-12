@@ -6,7 +6,7 @@ use rand::RngExt;
 
 use crate::GameRng;
 use crate::map::MapConfig;
-use crate::physics::{PLANE_LOCK, carried_layers, obstacle_layers};
+use crate::physics::{PLANE_LOCK, carried_layers, log_layers, obstacle_layers};
 use crate::sim::SimSet;
 
 /// Marker for tree entities. The entity's origin is the tree's center (halfway from base to tip),
@@ -26,11 +26,11 @@ pub enum TreeState {
         dir: Vec3,
         progress: f32,
     },
-    /// Lying on the ground, free for a character to drag away.
+    /// Lying on the ground, free for a character to drag away. Characters climb over it.
     Fallen,
     /// Being dragged by this character.
     Carried(Entity),
-    /// Dropped off at a character's home; no longer interacted with.
+    /// Dropped off at a character's home; no longer interacted with. Characters climb over it.
     Delivered,
 }
 
@@ -311,39 +311,38 @@ fn animate_falling_trees(time: Res<Time>, mut trees: Query<(&mut TreeState, &mut
     }
 }
 
-/// Keeps each tree's rigid body in step with its state: static while it's an obstacle, kinematic
-/// while the fall animation drives it, dynamic (held by a joint) while being dragged.
+/// Keeps each tree's rigid body in step with its state: static while standing (an obstacle) or
+/// lying down (a log, walked over), kinematic while the fall animation drives it, dynamic (held
+/// by a joint) while being dragged.
 fn sync_tree_bodies(
     mut commands: Commands,
-    trees: Query<(Entity, &TreeState, &RigidBody), Changed<TreeState>>,
+    trees: Query<(Entity, &TreeState, &RigidBody, &CollisionLayers), Changed<TreeState>>,
 ) {
-    for (entity, state, body) in &trees {
-        let wanted = match state {
-            TreeState::Falling { .. } => RigidBody::Kinematic,
-            TreeState::Carried(_) => RigidBody::Dynamic,
-            TreeState::Standing { .. } | TreeState::Fallen | TreeState::Delivered => {
-                RigidBody::Static
-            }
+    for (entity, state, body, layers) in &trees {
+        let (wanted_body, wanted_layers) = match state {
+            TreeState::Standing { .. } => (RigidBody::Static, obstacle_layers()),
+            TreeState::Falling { .. } => (RigidBody::Kinematic, obstacle_layers()),
+            TreeState::Fallen | TreeState::Delivered => (RigidBody::Static, log_layers()),
+            TreeState::Carried(_) => (RigidBody::Dynamic, carried_layers()),
         };
-        if *body == wanted {
+        if *body == wanted_body && *layers == wanted_layers {
             continue;
         }
 
         let mut tree = commands.entity(entity);
-        tree.insert((wanted, LinearVelocity::ZERO, AngularVelocity::ZERO));
-        match wanted {
-            RigidBody::Dynamic => {
-                tree.insert((
-                    carried_layers(),
-                    PLANE_LOCK,
-                    Mass(5.0),
-                    LinearDamping(2.0),
-                    AngularDamping(4.0),
-                ));
-            }
-            _ => {
-                tree.insert(obstacle_layers());
-            }
+        tree.insert((
+            wanted_body,
+            wanted_layers,
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+        ));
+        if wanted_body == RigidBody::Dynamic {
+            tree.insert((
+                PLANE_LOCK,
+                Mass(5.0),
+                LinearDamping(2.0),
+                AngularDamping(4.0),
+            ));
         }
     }
 }

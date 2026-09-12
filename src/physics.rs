@@ -13,8 +13,11 @@ pub enum Layer {
     #[default]
     Default,
     Character,
-    /// Standing trees and logs lying on the ground.
+    /// Standing and falling trees: solid, characters steer around them.
     Obstacle,
+    /// Logs lying on the ground: characters climb over them rather than around, so they
+    /// collide with nothing and are only ever found by spatial queries.
+    Log,
     /// A log being dragged: passes through everything, it's held by a joint instead.
     Carried,
 }
@@ -27,8 +30,19 @@ pub fn obstacle_layers() -> CollisionLayers {
     CollisionLayers::new(Layer::Obstacle, [Layer::Character])
 }
 
+pub fn log_layers() -> CollisionLayers {
+    CollisionLayers::new(Layer::Log, LayerMask::NONE)
+}
+
 pub fn carried_layers() -> CollisionLayers {
     CollisionLayers::new(Layer::Carried, LayerMask::NONE)
+}
+
+/// What a walking character looks ahead for and swerves around: everything it can't walk over.
+pub fn steer_mask() -> LayerMask {
+    let mut mask = LayerMask::ALL;
+    mask.remove(Layer::Log);
+    mask
 }
 
 /// Keeps a body on the ground plane: it may move in XZ and spin around Y only.
@@ -66,5 +80,27 @@ fn toggle_debug_gizmos(keys: Res<ButtonInput<KeyCode>>, mut store: ResMut<GizmoC
     if keys.just_pressed(KeyCode::F1) {
         let config = store.config_mut::<PhysicsGizmos>().0;
         config.enabled = !config.enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_are_walked_over_and_trees_are_not() {
+        assert!(character_layers().interacts_with(obstacle_layers()));
+        assert!(character_layers().interacts_with(character_layers()));
+        assert!(!character_layers().interacts_with(log_layers()));
+        assert!(!character_layers().interacts_with(carried_layers()));
+    }
+
+    #[test]
+    fn steering_ignores_logs_only() {
+        let mask = steer_mask();
+        assert!(!mask.has_all(Layer::Log));
+        assert!(mask.has_all(Layer::Obstacle));
+        assert!(mask.has_all(Layer::Character));
+        assert!(mask.has_all(Layer::Carried));
     }
 }

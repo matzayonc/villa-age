@@ -7,7 +7,7 @@ use rand::RngExt;
 use crate::GameRng;
 use crate::history::{Action, ActionLog};
 use crate::map::MapConfig;
-use crate::physics::character_layers;
+use crate::physics::{Layer, character_layers, steer_mask};
 use crate::sim::SimSet;
 use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 
@@ -78,12 +78,18 @@ const SWING_ANGLE: f32 = 0.25;
 const ROPE_LENGTH: f32 = ARRIVE_DISTANCE;
 /// Standing trees below this maturity are left to grow.
 const HARVEST_MATURITY: f32 = 0.6;
+/// Walking speed multiplier while climbing over a log.
+const CLIMB_SPEED_FACTOR: f32 = 0.35;
+/// How much a character rises while on top of a log (the log's radius).
+const CLIMB_HEIGHT: f32 = TRUNK_RADIUS;
 /// Steering: how far ahead to look for obstacles, and how hard to swerve around them.
 const LOOKAHEAD: f32 = 2.5;
 const AVOID_STRENGTH: f32 = 1.5;
 
 const RADIUS: f32 = 0.4;
 const HEIGHT: f32 = 1.0;
+/// Height of the capsule's center when it stands on the ground.
+const GROUND_Y: f32 = HEIGHT / 2.0 + RADIUS;
 /// Character colors, cycled by spawn index.
 const COLORS: [Color; 5] = [
     Color::srgb(0.85, 0.25, 0.2),
@@ -110,12 +116,10 @@ fn spawn_characters(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Capsule stands on the ground when its center is at half-height + radius.
-    let y = HEIGHT / 2.0 + RADIUS;
     let mesh = meshes.add(Capsule3d::new(RADIUS, HEIGHT));
 
     for (i, &(x, z)) in map.characters.iter().enumerate() {
-        let position = Vec3::new(x, y, z);
+        let position = Vec3::new(x, GROUND_Y, z);
         let color = COLORS[i % COLORS.len()];
         let strength = Strength(rng.0.random_range(STAT_RANGE));
         let speed = Speed(rng.0.random_range(STAT_RANGE));
@@ -163,8 +167,22 @@ impl WalkerItem<'_, '_> {
         self.heading.0 = self.heading.0.rotate_towards(target, TURN_SPEED * dt);
     }
 
+    /// Whether the character is on top of a log (its capsule overlaps one).
+    fn on_log(&self, spatial: &SpatialQuery) -> bool {
+        !spatial
+            .shape_intersections(
+                self.collider,
+                self.transform.translation,
+                Quat::IDENTITY,
+                &SpatialQueryFilter::from_mask(Layer::Log),
+            )
+            .is_empty()
+    }
+
     /// Sets the velocity to move toward `target` (in XZ) without overshooting, steering around
-    /// anything in the way except `ignore`; returns the remaining distance. Stops when within `stop_at`.
+    /// anything in the way except `ignore`; returns the remaining distance. Stops when within
+    /// `stop_at`. Logs aren't steered around but climbed over, which is slow and lifts the
+    /// character while it's on one.
     fn walk_toward(
         &mut self,
         spatial: &SpatialQuery,
@@ -173,6 +191,13 @@ impl WalkerItem<'_, '_> {
         ignore: Option<Entity>,
         dt: f32,
     ) -> f32 {
+        let climbing = self.on_log(spatial);
+        self.transform.translation.y = if climbing {
+            GROUND_Y + CLIMB_HEIGHT
+        } else {
+            GROUND_Y
+        };
+
         let to_target = target - self.transform.translation.xz();
         let distance = to_target.length();
         if distance <= stop_at {
@@ -182,7 +207,11 @@ impl WalkerItem<'_, '_> {
         let dir = to_target / distance;
         let desired = Vec3::new(dir.x, 0.0, dir.y);
         let steered = self.steer(spatial, desired, ignore);
-        let speed = (MOVE_SPEED * self.speed.0).min((distance - stop_at) / dt);
+        let mut max_speed = MOVE_SPEED * self.speed.0;
+        if climbing {
+            max_speed *= CLIMB_SPEED_FACTOR;
+        }
+        let speed = max_speed.min((distance - stop_at) / dt);
         self.velocity.0 = steered * speed;
         self.turn_toward(steered, dt);
         distance
@@ -194,8 +223,8 @@ impl WalkerItem<'_, '_> {
         let Ok(direction) = Dir3::new(desired) else {
             return desired;
         };
-        let filter =
-            SpatialQueryFilter::from_excluded_entities([self.entity].into_iter().chain(ignore));
+        let filter = SpatialQueryFilter::from_mask(steer_mask())
+            .with_excluded_entities([self.entity].into_iter().chain(ignore));
         let Some(hit) = spatial.cast_shape(
             self.collider,
             self.transform.translation,
