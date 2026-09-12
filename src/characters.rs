@@ -346,3 +346,76 @@ fn haul(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(entity: Entity, base: Vec2, state: &TreeState, maturity: f32) -> TreeInfo<'_> {
+        TreeInfo {
+            entity,
+            base,
+            state,
+            maturity: Maturity(maturity),
+        }
+    }
+
+    #[test]
+    fn only_harvestable_trees_are_targets() {
+        let mut world = World::new();
+        let (tree, other) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let base = Vec2::new(3.0, 4.0);
+        let pos = Vec2::ZERO;
+
+        let standing = TreeState::Standing { damage: 0.0 };
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &standing, HARVEST_MATURITY)),
+            Some(25.0)
+        );
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &standing, HARVEST_MATURITY - 0.01)),
+            None,
+            "immature trees are left to grow"
+        );
+        let falling = TreeState::Falling {
+            base: Vec3::ZERO,
+            dir: Vec3::X,
+            progress: 0.5,
+        };
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &falling, 0.0)),
+            Some(25.0)
+        );
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &TreeState::Fallen, 0.0)),
+            Some(25.0)
+        );
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &TreeState::Carried(other), 1.0)),
+            None
+        );
+        assert_eq!(
+            tree_priority(pos, &info(tree, base, &TreeState::Delivered, 1.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn choose_tree_picks_the_nearest_valid_one() {
+        let mut world = World::new();
+        let ids: Vec<Entity> = (0..3).map(|_| world.spawn_empty().id()).collect();
+        let standing = TreeState::Standing { damage: 0.0 };
+        let pos = Vec2::ZERO;
+
+        let candidates = [
+            info(ids[0], Vec2::new(1.0, 0.0), &standing, 0.1), // nearest, but a sapling
+            info(ids[1], Vec2::new(0.0, 5.0), &TreeState::Fallen, 0.0),
+            info(ids[2], Vec2::new(4.0, 0.0), &standing, 1.0),
+        ];
+        let chosen = choose_tree(pos, candidates).unwrap();
+        assert_eq!(chosen.entity, ids[2]);
+
+        let none = choose_tree(pos, [info(ids[0], Vec2::X, &standing, 0.1)]);
+        assert!(none.is_none());
+    }
+}

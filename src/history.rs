@@ -452,3 +452,112 @@ fn write_history(out: &mut String, log: &ActionLog, now: f32) {
         out.push_str("(no history)");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entity(world: &mut World) -> Entity {
+        world.spawn_empty().id()
+    }
+
+    #[test]
+    fn record_skips_repeats_of_the_current_action() {
+        let mut world = World::new();
+        let tree = entity(&mut world);
+        let mut log = ActionLog::default();
+
+        log.record(1.0, Action::WalkTo { tree });
+        log.record(2.0, Action::WalkTo { tree });
+        log.record(3.0, Action::Chop { tree });
+        log.record(4.0, Action::WalkTo { tree });
+
+        let actions: Vec<_> = log.iter().map(|e| (e.at, e.action)).collect();
+        assert_eq!(
+            actions,
+            [
+                (1.0, Action::WalkTo { tree }),
+                (3.0, Action::Chop { tree }),
+                (4.0, Action::WalkTo { tree }),
+            ]
+        );
+        assert_eq!(log.current().unwrap().at, 4.0);
+    }
+
+    #[test]
+    fn empty_log_has_no_current_action() {
+        let log = ActionLog::default();
+        assert!(log.current().is_none());
+        assert_eq!(log.iter().len(), 0);
+        assert_eq!(log.since(0.0).count(), 0);
+    }
+
+    #[test]
+    fn log_drops_oldest_past_capacity() {
+        let mut world = World::new();
+        let (a, b) = (entity(&mut world), entity(&mut world));
+        let mut log = ActionLog::default();
+
+        // Alternate so no entry is deduplicated away.
+        for i in 0..(HISTORY_CAPACITY + 5) {
+            let tree = if i % 2 == 0 { a } else { b };
+            log.record(i as f32, Action::Chop { tree });
+        }
+
+        assert_eq!(log.iter().len(), HISTORY_CAPACITY);
+        assert_eq!(log.iter().next().unwrap().at, 5.0, "oldest five evicted");
+        assert_eq!(log.current().unwrap().at, (HISTORY_CAPACITY + 4) as f32);
+    }
+
+    #[test]
+    fn since_returns_recent_entries_newest_first() {
+        let mut world = World::new();
+        let tree = entity(&mut world);
+        let mut log = ActionLog::default();
+        log.record(0.0, Action::Idle);
+        log.record(5.0, Action::WalkTo { tree });
+        log.record(10.0, Action::Chop { tree });
+        log.record(15.0, Action::Haul { tree });
+
+        let at: Vec<f32> = log.since(5.0).map(|e| e.at).collect();
+        assert_eq!(at, [15.0, 10.0, 5.0]);
+        assert_eq!(log.since(16.0).count(), 0);
+    }
+
+    #[test]
+    fn write_history_formats_newest_first_with_durations() {
+        let mut log = ActionLog::default();
+        let mut out = String::new();
+
+        write_history(&mut out, &log, 10.0);
+        assert_eq!(out, "(no history)");
+
+        let mut world = World::new();
+        let tree = entity(&mut world);
+        log.record(2.0, Action::Idle);
+        log.record(5.0, Action::Chop { tree });
+        write_history(&mut out, &log, 10.0);
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Current action: started 5s ago, still going (5s so far).
+        assert!(lines[0].starts_with("   5.0s ago  Chop"), "{:?}", lines[0]);
+        assert!(lines[0].ends_with("(5.0s)"), "{:?}", lines[0]);
+        // Previous action lasted from 2s to 5s.
+        assert_eq!(lines[1], "   8.0s ago  Idle  (3.0s)");
+    }
+
+    #[test]
+    fn write_history_shows_at_most_window_lines() {
+        let mut world = World::new();
+        let (a, b) = (entity(&mut world), entity(&mut world));
+        let mut log = ActionLog::default();
+        for i in 0..(WINDOW_LINES * 2) {
+            let tree = if i % 2 == 0 { a } else { b };
+            log.record(i as f32, Action::Chop { tree });
+        }
+        let mut out = String::new();
+        write_history(&mut out, &log, 100.0);
+        assert_eq!(out.lines().count(), WINDOW_LINES);
+    }
+}

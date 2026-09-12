@@ -177,3 +177,25 @@ fn exit_when_done(
         exit.write(AppExit::Success);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_speed_sets_rate_and_keeps_a_sane_delta_clamp() {
+        let mut time = Time::<Virtual>::default();
+        let step = 1.0 / 60.0;
+
+        apply_speed(&mut time, 1.0, step);
+        assert_eq!(time.relative_speed(), 1.0);
+        // 4 frames at 1× is well under the 250ms floor.
+        assert_eq!(time.max_delta(), Duration::from_millis(250));
+
+        apply_speed(&mut time, 64.0, step);
+        assert_eq!(time.relative_speed(), 64.0);
+        let expected = Duration::from_secs_f32(step * 64.0 * 4.0);
+        assert_eq!(time.max_delta(), expected);
+        assert!(expected > Duration::from_millis(250));
+    }
+}

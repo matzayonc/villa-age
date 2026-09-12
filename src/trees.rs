@@ -347,3 +347,71 @@ fn sync_tree_bodies(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maturity_scales_from_sapling_to_full_size() {
+        assert_eq!(Maturity(0.0).scale(), SAPLING_SCALE);
+        assert_eq!(Maturity(1.0).scale(), 1.0);
+        let half = Maturity(0.5).scale();
+        assert!(half > SAPLING_SCALE && half < 1.0);
+        // Out-of-range values clamp rather than extrapolate.
+        assert_eq!(Maturity(-1.0).scale(), SAPLING_SCALE);
+        assert_eq!(Maturity(3.0).scale(), 1.0);
+    }
+
+    #[test]
+    fn health_grows_with_maturity() {
+        assert_eq!(max_health(Maturity(1.0)), TREE_HEALTH);
+        assert!(max_health(Maturity(0.0)) < max_health(Maturity(1.0)));
+        assert!(max_health(Maturity(0.0)) > 0.0);
+    }
+
+    #[test]
+    fn tree_base_is_below_the_center_when_upright() {
+        let scale = 0.5;
+        let transform = Transform::from_xyz(3.0, scale * TREE_LENGTH / 2.0, -4.0)
+            .with_scale(Vec3::splat(scale));
+        let base = tree_base(&transform);
+        assert!(base.abs_diff_eq(Vec3::new(3.0, 0.0, -4.0), 1e-5), "{base}");
+    }
+
+    #[test]
+    fn tree_base_follows_rotation_when_lying_down() {
+        // Tipped 90° around Z: the base is now beside the center along +X.
+        let transform = Transform::from_xyz(0.0, 0.0, 0.0)
+            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        let base = tree_base(&transform);
+        assert!(
+            base.abs_diff_eq(Vec3::new(TREE_LENGTH / 2.0, 0.0, 0.0), 1e-5),
+            "{base}"
+        );
+    }
+
+    #[test]
+    fn spot_is_free_respects_edge_margin_and_spacing() {
+        let map = MapConfig::from_ron("(size: 20.0, characters: [], trees: [])").unwrap();
+        let inner = map.half_extent() - EDGE_MARGIN;
+
+        assert!(spot_is_free(&map, Vec2::ZERO, []));
+        assert!(spot_is_free(&map, Vec2::new(inner, -inner), []));
+        assert!(!spot_is_free(&map, Vec2::new(inner + 0.01, 0.0), []));
+        assert!(!spot_is_free(&map, Vec2::new(0.0, -inner - 0.01), []));
+
+        let occupied = [Vec2::new(5.0, 5.0)];
+        assert!(!spot_is_free(
+            &map,
+            Vec2::new(5.0, 5.0 + TREE_SPACING - 0.01),
+            occupied
+        ));
+        assert!(spot_is_free(
+            &map,
+            Vec2::new(5.0, 5.0 + TREE_SPACING),
+            occupied
+        ));
+        assert!(!spot_is_free(&map, Vec2::new(6.0, 6.0), occupied));
+    }
+}

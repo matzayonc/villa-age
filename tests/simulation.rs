@@ -2,22 +2,28 @@
 
 use bevy::prelude::*;
 use villa_age::characters::Character;
+use villa_age::history::{Action, ActionLog};
 use villa_age::trees::{MAX_TREES, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
-/// Builds a headless app and steps it for `sim_seconds` of simulated time.
+/// Builds a headless app on the default map and steps it for `sim_seconds` of simulated time.
 fn run_headless(seed: u64, sim_seconds: f32) -> App {
-    let config = RunConfig {
+    let mut app = build_app(&RunConfig {
         headless: true,
         seed,
         ..RunConfig::default()
-    };
-    let mut app = build_app(&config);
-    let frames = (sim_seconds / config.step).ceil() as u32;
+    });
+    step(&mut app, sim_seconds);
+    app
+}
+
+/// Advances a headless app by `sim_seconds` of simulated time.
+fn step(app: &mut App, sim_seconds: f32) {
+    let step = app.world().resource::<RunConfig>().step;
+    let frames = (sim_seconds / step).ceil() as u32;
     for _ in 0..frames {
         app.update();
     }
-    app
 }
 
 fn tree_count(app: &mut App) -> usize {
@@ -55,7 +61,7 @@ fn snapshot(app: &mut App) -> Vec<[f32; 3]> {
 
 #[test]
 fn characters_deliver_logs() {
-    let mut app = run_headless(1, 180.0);
+    let mut app = run_headless(1, 45.0);
     let delivered = count_state(&mut app, |s| matches!(s, TreeState::Delivered));
     assert!(
         delivered >= 1,
@@ -65,11 +71,12 @@ fn characters_deliver_logs() {
 
 #[test]
 fn forest_regrows_within_cap() {
-    let mut app = run_headless(2, 120.0);
+    let initial = MapConfig::default().trees.len();
+    let mut app = run_headless(2, 60.0);
     let trees = tree_count(&mut app);
     assert!(
-        trees > 24,
-        "expected new saplings beyond the initial 24, got {trees}"
+        trees > initial,
+        "expected new saplings beyond the initial {initial}, got {trees}"
     );
     assert!(trees <= MAX_TREES, "tree cap exceeded: {trees}");
 }
@@ -129,6 +136,60 @@ fn custom_map_spawns_what_it_lists() {
         .collect();
     trees.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(trees, [[-6.0, 7.0], [5.0, 5.0], [8.0, -8.0]]);
+}
+
+/// One character, one mature tree next to it: the character should walk over, chop it down, wait
+/// for it to fall, drag it home and drop it — in that order, with nothing else in between.
+#[test]
+fn character_runs_through_the_gathering_cycle() {
+    let map = MapConfig::from_ron(
+        "(size: 20.0, characters: [(0.0, 0.0)], trees: [(pos: (3.0, 0.0), maturity: 1.0)])",
+    )
+    .unwrap();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        map,
+        ..RunConfig::default()
+    });
+    step(&mut app, 20.0);
+
+    let world = app.world_mut();
+    let tree = world
+        .query_filtered::<Entity, With<Tree>>()
+        .single(world)
+        .unwrap();
+    let log = world
+        .query_filtered::<&ActionLog, With<Character>>()
+        .single(world)
+        .unwrap();
+    let actions: Vec<Action> = log.iter().map(|e| e.action).collect();
+    assert_eq!(
+        actions,
+        [
+            Action::WalkTo { tree },
+            Action::Chop { tree },
+            Action::AwaitFall { tree },
+            Action::Haul { tree },
+            Action::Deliver { tree },
+            Action::Idle,
+        ]
+    );
+
+    // Chopping a fully grown tree takes a few seconds; hauling it home a few more.
+    let at: Vec<f32> = log.iter().map(|e| e.at).collect();
+    let chop_time = at[2] - at[1];
+    assert!((3.0..6.0).contains(&chop_time), "chop took {chop_time}s");
+    let haul_time = at[4] - at[3];
+    assert!((0.3..5.0).contains(&haul_time), "haul took {haul_time}s");
+
+    // The log ends up delivered, lying near home.
+    let (state, transform) = world
+        .query::<(&TreeState, &Transform)>()
+        .single(world)
+        .unwrap();
+    assert!(matches!(state, TreeState::Delivered));
+    let base = tree_base(transform);
+    assert!(base.xz().length() < 3.0, "log left at {base}");
 }
 
 #[test]

@@ -56,7 +56,7 @@ impl MapConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if !(self.size > 0.0) {
+        if self.size.is_nan() || self.size <= 0.0 {
             return Err(format!("map size must be positive, got {}", self.size));
         }
         let half = self.half_extent();
@@ -64,12 +64,17 @@ impl MapConfig {
 
         for (i, &pos) in self.characters.iter().enumerate() {
             if !on_map(pos) {
-                return Err(format!("character {i} at {pos:?} is outside the ±{half} map"));
+                return Err(format!(
+                    "character {i} at {pos:?} is outside the ±{half} map"
+                ));
             }
         }
         for (i, tree) in self.trees.iter().enumerate() {
             if !on_map(tree.pos) {
-                return Err(format!("tree {i} at {:?} is outside the ±{half} map", tree.pos));
+                return Err(format!(
+                    "tree {i} at {:?} is outside the ±{half} map",
+                    tree.pos
+                ));
             }
             if !(0.0..=1.0).contains(&tree.maturity) {
                 return Err(format!(
@@ -165,4 +170,91 @@ fn checkerboard_image(size: u32, cells: u32) -> Image {
     // Nearest filtering keeps the tile edges crisp instead of blurring them.
     image.sampler = ImageSampler::nearest();
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(body: &str) -> Result<MapConfig, String> {
+        MapConfig::from_ron(&format!("(size: 20.0, {body})"))
+    }
+
+    #[test]
+    fn default_map_is_valid_and_populated() {
+        let map = MapConfig::default();
+        assert_eq!(map.size, 40.0);
+        assert_eq!(map.half_extent(), 20.0);
+        assert!(map.texture.is_none());
+        assert_eq!(map.characters.len(), 5);
+        assert!(map.trees.len() >= 20, "{} trees", map.trees.len());
+    }
+
+    #[test]
+    fn texture_is_optional_and_parsed_when_given() {
+        let none = map("characters: [], trees: []").unwrap();
+        assert_eq!(none.texture, None);
+
+        let some = map(r#"texture: Some("maps/ground.png"), characters: [], trees: []"#).unwrap();
+        assert_eq!(some.texture.as_deref(), Some("maps/ground.png"));
+    }
+
+    #[test]
+    fn rejects_non_positive_size() {
+        for size in ["0.0", "-5.0", "NaN"] {
+            let err = MapConfig::from_ron(&format!("(size: {size}, characters: [], trees: [])"))
+                .unwrap_err();
+            assert!(err.contains("size must be positive"), "{size}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_character() {
+        let err = map("characters: [(0.0, 0.0), (0.0, -10.5)], trees: []").unwrap_err();
+        assert!(err.contains("character 1"), "{err}");
+    }
+
+    #[test]
+    fn accepts_positions_exactly_on_the_edge() {
+        let ok = map("characters: [(10.0, -10.0)], trees: [(pos: (-10.0, 10.0), maturity: 0.5)]");
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn rejects_maturity_outside_unit_range() {
+        for maturity in ["-0.1", "1.5", "NaN"] {
+            let err = map(&format!(
+                "characters: [], trees: [(pos: (0.0, 0.0), maturity: {maturity})]"
+            ))
+            .unwrap_err();
+            assert!(err.contains("tree 0 maturity"), "{maturity}: {err}");
+        }
+    }
+
+    #[test]
+    fn reports_syntax_errors() {
+        let err = MapConfig::from_ron("(size: 20.0, characters: [").unwrap_err();
+        assert!(err.starts_with("invalid map file:"), "{err}");
+    }
+
+    #[test]
+    fn load_reads_a_file_and_prefixes_errors_with_its_path() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("villa-age-map-{}.ron", std::process::id()));
+        std::fs::write(&path, "(size: 8.0, characters: [(1.0, 1.0)], trees: [])").unwrap();
+        let map = MapConfig::load(&path).unwrap();
+        assert_eq!(map.size, 8.0);
+        assert_eq!(map.characters, [(1.0, 1.0)]);
+
+        std::fs::write(&path, "(size: 8.0, characters: [(9.0, 0.0)], trees: [])").unwrap();
+        let err = MapConfig::load(&path).unwrap_err();
+        assert!(err.starts_with(&path.display().to_string()), "{err}");
+        assert!(err.contains("character 0"), "{err}");
+        std::fs::remove_file(&path).unwrap();
+
+        let missing = dir.join("villa-age-does-not-exist.ron");
+        let err = MapConfig::load(&missing).unwrap_err();
+        assert!(err.starts_with("can't read map"), "{err}");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+    }
 }
