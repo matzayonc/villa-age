@@ -3,12 +3,14 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use crate::history::{Action, ActionLog};
 use crate::physics::character_layers;
-use crate::trees::{BASE_OFFSET, TRUNK_RADIUS, TreeState, tree_base};
+use crate::sim::SimSet;
+use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 
 /// Marker for character entities.
 #[derive(Component)]
-#[require(Task, Heading)]
+#[require(Task, Heading, ActionLog)]
 pub struct Character;
 
 /// The direction the character is turned toward, smoothed over time. The transform's rotation is
@@ -45,6 +47,8 @@ const SWING_ANGLE: f32 = 0.25;
 /// Maximum length of the rope between a hauling character and the base of its log. Equal to the
 /// distance at which the character stopped to chop, so grabbing doesn't move the log.
 const ROPE_LENGTH: f32 = ARRIVE_DISTANCE;
+/// Standing trees below this maturity are left to grow.
+const HARVEST_MATURITY: f32 = 0.6;
 /// Steering: how far ahead to look for obstacles, and how hard to swerve around them.
 const LOOKAHEAD: f32 = 2.5;
 const AVOID_STRENGTH: f32 = 1.5;
@@ -57,7 +61,7 @@ pub struct CharactersPlugin;
 impl Plugin for CharactersPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_characters)
-            .add_systems(Update, (gather, haul).chain());
+            .add_systems(Update, (gather, haul).chain().in_set(SimSet::Characters));
     }
 }
 
@@ -78,12 +82,13 @@ fn spawn_characters(
         (Vec2::new(-8.0, -7.0), Color::srgb(0.2, 0.8, 0.75)),
     ];
 
-    for (pos, color) in placements {
+    for (i, (pos, color)) in placements.into_iter().enumerate() {
         let position = Vec3::new(pos.x, y, pos.y);
         // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d` with
         // `SceneRoot(asset_server.load("character.glb#Scene0"))`.
         commands.spawn((
             Character,
+            Name::new(format!("Character {}", i + 1)),
             Home(position),
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -174,15 +179,48 @@ impl WalkerItem<'_, '_> {
     }
 }
 
-/// Walks each gathering character to the nearest usable tree, chops it, and picks it up once fallen.
+/// What a character knows about a tree when deciding whether to go for it.
+struct TreeInfo<'a> {
+    entity: Entity,
+    /// Where it touches the ground, in XZ.
+    base: Vec2,
+    state: &'a TreeState,
+    maturity: Maturity,
+}
+
+/// How attractive a tree is to a character standing at `pos`: lower is better, `None` means it is
+/// not a valid target. This is the place to add smarter rules (yield, competition, distance from home...).
+fn tree_priority(pos: Vec2, tree: &TreeInfo) -> Option<f32> {
+    let distance = tree.base.distance_squared(pos);
+    match tree.state {
+        TreeState::Standing { .. } if tree.maturity.0 >= HARVEST_MATURITY => Some(distance),
+        TreeState::Falling { .. } | TreeState::Fallen => Some(distance),
+        TreeState::Standing { .. } | TreeState::Carried(_) | TreeState::Delivered => None,
+    }
+}
+
+/// The tree a character at `pos` should go for, if any.
+fn choose_tree<'a>(
+    pos: Vec2,
+    trees: impl IntoIterator<Item = TreeInfo<'a>>,
+) -> Option<TreeInfo<'a>> {
+    trees
+        .into_iter()
+        .filter_map(|tree| tree_priority(pos, &tree).map(|priority| (priority, tree)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, tree)| tree)
+}
+
+/// Walks each gathering character to its chosen tree, chops it, and picks it up once fallen.
 fn gather(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
-    mut trees: Query<(Entity, &Transform, &mut TreeState), Without<Character>>,
-    mut characters: Query<(Walker, &mut Task), With<Character>>,
+    mut trees: Query<(Entity, &Transform, &mut TreeState, &Maturity), Without<Character>>,
+    mut characters: Query<(Walker, &mut Task, &mut ActionLog), With<Character>>,
 ) {
-    for (mut walker, mut task) in &mut characters {
+    let now = time.elapsed_secs();
+    for (mut walker, mut task, mut log) in &mut characters {
         if !matches!(*task, Task::Gather) {
             continue;
         }
@@ -191,34 +229,35 @@ fn gather(
         // Chop swing angle applied on top of the heading this frame.
         let mut swing = 0.0;
 
-        let Some((tree, target, mut state)) = trees
-            .iter_mut()
-            .filter(|(_, _, state)| {
-                matches!(
-                    **state,
-                    TreeState::Standing { .. } | TreeState::Falling { .. } | TreeState::Fallen
-                )
-            })
-            .map(|(entity, t, state)| (entity, tree_base(t).xz(), state))
-            .min_by(|a, b| {
-                a.1.distance_squared(pos)
-                    .total_cmp(&b.1.distance_squared(pos))
-            })
-        else {
+        let candidates = trees.iter().map(|(entity, t, state, &maturity)| TreeInfo {
+            entity,
+            base: tree_base(t).xz(),
+            state,
+            maturity,
+        });
+        let Some(chosen) = choose_tree(pos, candidates) else {
             walker.velocity.0 = Vec3::ZERO;
+            log.record(now, Action::Idle);
+            continue;
+        };
+        let (tree, target) = (chosen.entity, chosen.base);
+        let Ok((_, tree_transform, mut state, &maturity)) = trees.get_mut(tree) else {
             continue;
         };
 
         let distance = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
-        if distance <= ARRIVE_DISTANCE {
+        if distance > ARRIVE_DISTANCE {
+            log.record(now, Action::WalkTo { tree });
+        } else {
             let to_tree = (target - pos).normalize_or(Vec2::X);
             let facing = Vec3::new(to_tree.x, 0.0, to_tree.y);
             walker.turn_toward(facing, dt);
 
             match *state {
-                TreeState::Standing { health } => {
-                    let health = health - CHOP_RATE * dt;
-                    if health <= 0.0 {
+                TreeState::Standing { damage } => {
+                    let damage = damage + CHOP_RATE * dt;
+                    if damage >= max_health(maturity) {
+                        log.record(now, Action::AwaitFall { tree });
                         // The tree falls away from whoever felled it.
                         *state = TreeState::Falling {
                             base: Vec3::new(target.x, 0.0, target.y),
@@ -226,30 +265,32 @@ fn gather(
                             progress: 0.0,
                         };
                     } else {
-                        *state = TreeState::Standing { health };
+                        *state = TreeState::Standing { damage };
+                        log.record(now, Action::Chop { tree });
                         // Lean toward the tree in a swinging motion while chopping.
                         swing = (time.elapsed_secs() * SWING_SPEED).sin().max(0.0) * SWING_ANGLE;
                     }
                 }
                 // Wait for it to hit the ground.
-                TreeState::Falling { .. } => {}
+                TreeState::Falling { .. } => log.record(now, Action::AwaitFall { tree }),
                 TreeState::Fallen => {
                     *state = TreeState::Carried(walker.entity);
+                    log.record(now, Action::Haul { tree });
                     // A slack rope from the character (held at log height) to the log's base: the
                     // log is only pulled once the rope is taut, so grabbing doesn't move it.
-                    let hand = Vec3::Y * (TRUNK_RADIUS - walker.transform.translation.y);
+                    let log_base = tree_base(tree_transform);
+                    let hand = Vec3::Y * (log_base.y - walker.transform.translation.y);
                     let slack = ROPE_LENGTH.max(distance);
-                    let rope = commands
-                        .spawn(
-                            DistanceJoint::new(walker.entity, tree)
-                                .with_local_anchor1(hand)
-                                .with_local_anchor2(BASE_OFFSET)
-                                .with_limits(0.0, slack),
-                        )
-                        .id();
+                    let mut joint = DistanceJoint::new(walker.entity, tree)
+                        .with_local_anchor1(hand)
+                        .with_limits(0.0, slack);
+                    joint.anchor2 = JointAnchor::FromGlobal(log_base);
+                    let rope = commands.spawn(joint).id();
                     *task = Task::Haul { tree, rope };
                 }
-                TreeState::Carried(_) | TreeState::Delivered => unreachable!("filtered out above"),
+                TreeState::Carried(_) | TreeState::Delivered => {
+                    unreachable!("rejected by tree_priority")
+                }
             }
         }
 
@@ -263,9 +304,10 @@ fn haul(
     time: Res<Time>,
     spatial: SpatialQuery,
     mut trees: Query<&mut TreeState, Without<Character>>,
-    mut characters: Query<(Walker, &mut Task, &Home), With<Character>>,
+    mut characters: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Character>>,
 ) {
-    for (mut walker, mut task, home) in &mut characters {
+    let now = time.elapsed_secs();
+    for (mut walker, mut task, home, mut log) in &mut characters {
         let Task::Haul { tree, rope } = *task else {
             continue;
         };
@@ -276,6 +318,7 @@ fn haul(
         if !owned {
             commands.entity(rope).despawn();
             *task = Task::Gather;
+            log.record(now, Action::LostLog { tree });
             continue;
         }
 
@@ -295,6 +338,7 @@ fn haul(
                 *state = TreeState::Delivered;
             }
             *task = Task::Gather;
+            log.record(now, Action::Deliver { tree });
         }
     }
 }

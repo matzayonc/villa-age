@@ -6,9 +6,20 @@ edition = "2024"
 [dependencies]
 # Default features already include 2d, 3d, mouse/keyboard input and x11.
 bevy = { version = "0.19", features = ["wayland"] }
-avian3d = "0.7"
+# `parallel` left out so physics is deterministic run-to-run for a given seed.
+avian3d = { version = "0.7", default-features = false, features = [
+    "3d",
+    "f32",
+    "parry-f32",
+    "debug-plugin",
+    "xpbd_joints",
+    "collider-from-mesh",
+    "bevy_scene",
+    "bevy_picking",
+] }
 rand = "0.10"
 rand_chacha = "0.10"
+clap = { version = "4", features = ["derive"] }
 
 # Faster dev iteration: optimize dependencies (Bevy) fully, our own code lightly.
 [profile.dev]

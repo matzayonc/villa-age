@@ -1,17 +1,23 @@
 //! Orbit camera driven by the mouse.
 //!
-//! - Left-drag: pan (grabs the map point under the cursor and drags it along)
-//! - Right-drag: orbit (yaw + pitch)
-//! - Scroll: zoom
+//! - Right-drag: pan (grabs the map point under the cursor and drags it along)
+//! - Middle-drag: orbit (yaw + pitch)
+//! - Scroll: zoom (ignored over the UI)
+//!
+//! The left button is left free for interacting with objects and windows (see `history`).
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::picking::hover::HoverMap;
+use bevy::picking::pointer::PointerId;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::map::MAP_SIZE;
+use crate::sim::SimSet;
 
-const PAN_BUTTON: MouseButton = MouseButton::Left;
-const ORBIT_BUTTON: MouseButton = MouseButton::Right;
+const PAN_BUTTON: MouseButton = MouseButton::Right;
+const ORBIT_BUTTON: MouseButton = MouseButton::Middle;
 
 /// Radians of rotation per pixel of mouse movement.
 const ORBIT_SENSITIVITY: f32 = 0.005;
@@ -44,8 +50,12 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
-            .add_systems(Update, (zoom, orbit, pan, sync_transform).chain());
+        app.add_systems(Startup, spawn_camera).add_systems(
+            Update,
+            (zoom, orbit, pan, sync_transform)
+                .chain()
+                .in_set(SimSet::Camera),
+        );
     }
 }
 
@@ -62,8 +72,8 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-fn zoom(scroll: Res<AccumulatedMouseScroll>, mut camera: Single<&mut OrbitCamera>) {
-    if scroll.delta.y == 0.0 {
+fn zoom(scroll: Res<AccumulatedMouseScroll>, ui: UiHover, mut camera: Single<&mut OrbitCamera>) {
+    if scroll.delta.y == 0.0 || ui.over_ui() {
         return;
     }
     let step = match scroll.unit {
@@ -116,15 +126,37 @@ fn pan(
     }
 }
 
+/// Whether the mouse is over a UI node.
+#[derive(SystemParam)]
+pub struct UiHover<'w, 's> {
+    hover: Res<'w, HoverMap>,
+    nodes: Query<'w, 's, (), With<Node>>,
+}
+
+impl UiHover<'_, '_> {
+    pub fn over_ui(&self) -> bool {
+        // The picking window backend always lists the window itself as a hit, so check for
+        // actual UI nodes rather than for any hit.
+        self.hover
+            .get(&PointerId::Mouse)
+            .is_some_and(|hits| hits.keys().any(|&entity| self.nodes.contains(entity)))
+    }
+}
+
+/// The view ray under the cursor, if the cursor is inside the window.
+pub fn cursor_ray(window: &Window, camera: &Camera, transform: &GlobalTransform) -> Option<Ray3d> {
+    let cursor = window.cursor_position()?;
+    camera.viewport_to_world(transform, cursor).ok()
+}
+
 /// Where the cursor's view ray hits the ground plane (y = 0), if it does.
 fn cursor_ground_point(
     window: &Window,
     camera: &Camera,
     transform: &GlobalTransform,
 ) -> Option<Vec3> {
-    let cursor = window.cursor_position()?;
-    let ray = camera.viewport_to_world(transform, cursor).ok()?;
-    ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+    cursor_ray(window, camera, transform)?
+        .plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
 }
 
 fn sync_transform(camera: Single<(&OrbitCamera, &mut Transform)>) {

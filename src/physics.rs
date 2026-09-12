@@ -6,6 +6,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use crate::RunConfig;
+
 #[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
 pub enum Layer {
     #[default]
@@ -39,10 +41,19 @@ pub struct GamePhysicsPlugin;
 
 impl Plugin for GamePhysicsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((PhysicsPlugins::default(), PhysicsDebugPlugin))
-            .insert_resource(Gravity(Vec3::ZERO))
-            .add_systems(Startup, disable_debug_gizmos)
-            .add_systems(Update, toggle_debug_gizmos);
+        app.add_plugins(PhysicsPlugins::default())
+            .insert_resource(Gravity(Vec3::ZERO));
+
+        // Debug rendering only makes sense with a window.
+        let headless = app
+            .world()
+            .get_resource::<RunConfig>()
+            .is_some_and(|c| c.headless);
+        if !headless {
+            app.add_plugins(PhysicsDebugPlugin)
+                .add_systems(Startup, disable_debug_gizmos)
+                .add_systems(Update, toggle_debug_gizmos);
+        }
     }
 }
 
