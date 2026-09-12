@@ -117,7 +117,11 @@ fn pan(
 }
 
 /// Where the cursor's view ray hits the ground plane (y = 0), if it does.
-fn cursor_ground_point(window: &Window, camera: &Camera, transform: &GlobalTransform) -> Option<Vec3> {
+fn cursor_ground_point(
+    window: &Window,
+    camera: &Camera,
+    transform: &GlobalTransform,
+) -> Option<Vec3> {
     let cursor = window.cursor_position()?;
     let ray = camera.viewport_to_world(transform, cursor).ok()?;
     ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
