@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use rand::RngExt;
 
 use crate::GameRng;
-use crate::map::MAP_SIZE;
+use crate::map::MapConfig;
 use crate::physics::{PLANE_LOCK, carried_layers, obstacle_layers};
 use crate::sim::SimSet;
 
@@ -83,7 +83,6 @@ impl Plugin for TreesPlugin {
     }
 }
 
-const TREE_COUNT: u32 = 24;
 /// Chopping work (in seconds of one character chopping) to fell a fully grown tree.
 const TREE_HEALTH: f32 = 4.0;
 /// Seconds it takes a felled tree to hit the ground.
@@ -180,34 +179,23 @@ fn spawn_tree(commands: &mut Commands, assets: &TreeAssets, base: Vec2, maturity
 }
 
 /// Whether a sapling can go at `spot`: on the map and clear of every point in `occupied`.
-fn spot_is_free(spot: Vec2, occupied: impl IntoIterator<Item = Vec2>) -> bool {
-    let half = MAP_SIZE / 2.0 - EDGE_MARGIN;
+fn spot_is_free(map: &MapConfig, spot: Vec2, occupied: impl IntoIterator<Item = Vec2>) -> bool {
+    let half = map.half_extent() - EDGE_MARGIN;
     spot.abs().max_element() <= half
         && occupied
             .into_iter()
             .all(|p| p.distance_squared(spot) >= TREE_SPACING * TREE_SPACING)
 }
 
-fn spawn_trees(mut commands: Commands, assets: Res<TreeAssets>, mut rng: ResMut<GameRng>) {
-    let rng = &mut rng.0;
-    let half = MAP_SIZE / 2.0 - EDGE_MARGIN;
-    let mut placed: Vec<Vec2> = Vec::new();
-
-    for _ in 0..TREE_COUNT {
-        for _ in 0..SEED_ATTEMPTS {
-            let spot = Vec2::new(
-                rng.random_range(-half..=half),
-                rng.random_range(-half..=half),
-            );
-            // Keep the middle clear so characters don't start inside a tree.
-            if spot.abs().max_element() < 3.0 || !spot_is_free(spot, placed.iter().copied()) {
-                continue;
-            }
-            let maturity = Maturity(rng.random_range(0.2..=1.0));
-            spawn_tree(&mut commands, &assets, spot, maturity);
-            placed.push(spot);
-            break;
-        }
+/// Spawns the trees the map lists.
+fn spawn_trees(mut commands: Commands, assets: Res<TreeAssets>, map: Res<MapConfig>) {
+    for tree in &map.trees {
+        spawn_tree(
+            &mut commands,
+            &assets,
+            Vec2::from(tree.pos),
+            Maturity(tree.maturity),
+        );
     }
 }
 
@@ -251,6 +239,7 @@ fn disperse_seeds(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<TreeAssets>,
+    map: Res<MapConfig>,
     mut rng: ResMut<GameRng>,
     mut parents: Query<(&Transform, &TreeState, &mut SeedTimer)>,
     trees: Query<&Transform, With<Tree>>,
@@ -276,7 +265,7 @@ fn disperse_seeds(
         for _ in 0..SEED_ATTEMPTS {
             let angle = rng.random_range(0.0..std::f32::consts::TAU);
             let spot = parent + Vec2::from_angle(angle) * rng.random_range(SEED_DISTANCE);
-            if spot_is_free(spot, occupied.iter().copied()) {
+            if spot_is_free(&map, spot, occupied.iter().copied()) {
                 debug!("sapling dropped at {spot} ({} trees)", tree_count + 1);
                 spawn_tree(&mut commands, &assets, spot, Maturity(0.0));
                 occupied.push(spot);

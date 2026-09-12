@@ -13,6 +13,8 @@ use bevy::winit::WinitPlugin;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+pub use map::MapConfig;
+
 pub mod camera;
 pub mod characters;
 pub mod history;
@@ -45,6 +47,8 @@ pub struct RunConfig {
     pub step: f32,
     /// Physics steps per simulated second.
     pub physics_hz: f64,
+    /// The map to play on.
+    pub map: MapConfig,
 }
 
 impl Default for RunConfig {
@@ -57,6 +61,7 @@ impl Default for RunConfig {
             duration: None,
             step: 1.0 / 60.0,
             physics_hz: 64.0,
+            map: MapConfig::default(),
         }
     }
 }
@@ -108,6 +113,7 @@ pub fn build_app(config: &RunConfig) -> App {
         .insert_resource(WorldSeed(config.seed))
         .insert_resource(GameRng(ChaCha8Rng::seed_from_u64(config.seed)))
         .insert_resource(config.clone())
+        .insert_resource(config.map.clone())
         .add_plugins((
             sim::SimPlugin,
             physics::GamePhysicsPlugin,

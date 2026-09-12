@@ -4,6 +4,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::history::{Action, ActionLog};
+use crate::map::MapConfig;
 use crate::physics::character_layers;
 use crate::sim::SimSet;
 use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
@@ -55,6 +56,14 @@ const AVOID_STRENGTH: f32 = 1.5;
 
 const RADIUS: f32 = 0.4;
 const HEIGHT: f32 = 1.0;
+/// Character colors, cycled by spawn index.
+const COLORS: [Color; 5] = [
+    Color::srgb(0.85, 0.25, 0.2),
+    Color::srgb(0.2, 0.45, 0.9),
+    Color::srgb(0.95, 0.8, 0.2),
+    Color::srgb(0.6, 0.3, 0.8),
+    Color::srgb(0.2, 0.8, 0.75),
+];
 
 pub struct CharactersPlugin;
 
@@ -65,8 +74,10 @@ impl Plugin for CharactersPlugin {
     }
 }
 
+/// Spawns a character at each of the map's spawn points.
 fn spawn_characters(
     mut commands: Commands,
+    map: Res<MapConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -74,16 +85,9 @@ fn spawn_characters(
     let y = HEIGHT / 2.0 + RADIUS;
     let mesh = meshes.add(Capsule3d::new(RADIUS, HEIGHT));
 
-    let placements = [
-        (Vec2::new(0.0, 0.0), Color::srgb(0.85, 0.25, 0.2)),
-        (Vec2::new(4.0, -3.0), Color::srgb(0.2, 0.45, 0.9)),
-        (Vec2::new(-5.0, 2.0), Color::srgb(0.95, 0.8, 0.2)),
-        (Vec2::new(7.0, 6.0), Color::srgb(0.6, 0.3, 0.8)),
-        (Vec2::new(-8.0, -7.0), Color::srgb(0.2, 0.8, 0.75)),
-    ];
-
-    for (i, (pos, color)) in placements.into_iter().enumerate() {
-        let position = Vec3::new(pos.x, y, pos.y);
+    for (i, &(x, z)) in map.characters.iter().enumerate() {
+        let position = Vec3::new(x, y, z);
+        let color = COLORS[i % COLORS.len()];
         // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d` with
         // `SceneRoot(asset_server.load("character.glb#Scene0"))`.
         commands.spawn((

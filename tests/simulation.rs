@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use villa_age::characters::Character;
 use villa_age::trees::{MAX_TREES, Tree, TreeState, tree_base};
-use villa_age::{RunConfig, build_app};
+use villa_age::{MapConfig, RunConfig, build_app};
 
 /// Builds a headless app and steps it for `sim_seconds` of simulated time.
 fn run_headless(seed: u64, sim_seconds: f32) -> App {
@@ -88,4 +88,54 @@ fn same_seed_same_world() {
             );
         }
     }
+}
+
+#[test]
+fn custom_map_spawns_what_it_lists() {
+    let map = MapConfig::from_ron(
+        r#"(
+            size: 20.0,
+            characters: [(1.0, 2.0), (-3.0, -4.0)],
+            trees: [
+                (pos: (5.0, 5.0), maturity: 1.0),
+                (pos: (-6.0, 7.0), maturity: 0.5),
+                (pos: (8.0, -8.0), maturity: 0.0),
+            ],
+        )"#,
+    )
+    .unwrap();
+    let config = RunConfig {
+        headless: true,
+        map,
+        ..RunConfig::default()
+    };
+    let mut app = build_app(&config);
+    app.update();
+
+    assert_eq!(tree_count(&mut app), 3);
+    let world = app.world_mut();
+    let mut characters: Vec<[f32; 2]> = world
+        .query_filtered::<&Transform, With<Character>>()
+        .iter(world)
+        .map(|t| t.translation.xz().to_array())
+        .collect();
+    characters.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(characters, [[-3.0, -4.0], [1.0, 2.0]]);
+
+    let mut trees: Vec<[f32; 2]> = world
+        .query_filtered::<&Transform, With<Tree>>()
+        .iter(world)
+        .map(|t| tree_base(t).xz().to_array())
+        .collect();
+    trees.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(trees, [[-6.0, 7.0], [5.0, 5.0], [8.0, -8.0]]);
+}
+
+#[test]
+fn map_rejects_out_of_bounds_tree() {
+    let err = MapConfig::from_ron(
+        "(size: 20.0, characters: [], trees: [(pos: (50.0, 0.0), maturity: 1.0)])",
+    )
+    .unwrap_err();
+    assert!(err.contains("tree 0"), "unexpected error: {err}");
 }

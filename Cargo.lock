@@ -5844,6 +5844,8 @@ dependencies = [
  "clap",
  "rand",
  "rand_chacha",
+ "ron",
+ "serde",
 ]
 
 [[package]]

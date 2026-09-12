@@ -20,6 +20,8 @@ avian3d = { version = "0.7", default-features = false, features = [
 rand = "0.10"
 rand_chacha = "0.10"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
 
 # Faster dev iteration: optimize dependencies (Bevy) fully, our own code lightly.
 [profile.dev]

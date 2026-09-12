@@ -1,5 +1,7 @@
+use std::path::PathBuf;
+
 use clap::Parser;
-use villa_age::{RunConfig, build_app};
+use villa_age::{MapConfig, RunConfig, build_app};
 
 /// Villa Age.
 #[derive(Parser)]
@@ -26,10 +28,20 @@ struct Cli {
     /// Physics steps per simulated second (lower is faster, less accurate).
     #[arg(long, default_value_t = 64.0)]
     physics_hz: f64,
+    /// Map definition (.ron); the built-in default map when omitted.
+    #[arg(long)]
+    map: Option<PathBuf>,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let map = match cli.map {
+        Some(path) => MapConfig::load(&path).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }),
+        None => MapConfig::default(),
+    };
     let config = RunConfig {
         headless: cli.headless,
         seed: cli.seed,
@@ -38,6 +50,7 @@ fn main() {
         duration: cli.duration,
         step: cli.step,
         physics_hz: cli.physics_hz,
+        map,
     };
     build_app(&config).run();
 }

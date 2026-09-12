@@ -1,13 +1,92 @@
-//! The flat 2D map: a textured ground quad lying in the XZ plane, plus scene lighting.
+//! The flat 2D map: a textured ground quad lying in the XZ plane, plus scene lighting. The map's
+//! layout comes from a RON file (see `assets/maps/default.ron`).
+
+use std::path::Path;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use serde::Deserialize;
 
-/// Side length of the map in world units.
-pub const MAP_SIZE: f32 = 40.0;
+/// The built-in map, compiled in so no file is needed at runtime.
+const DEFAULT_MAP: &str = include_str!("../assets/maps/default.ron");
+
+/// Everything a map file defines: the ground and what initially stands on it.
+#[derive(Resource, Deserialize, Clone, Debug)]
+pub struct MapConfig {
+    /// Side length of the square map in world units, centered on the origin.
+    pub size: f32,
+    /// Ground texture path under `assets/`; a placeholder checkerboard when `None`.
+    #[serde(default)]
+    pub texture: Option<String>,
+    /// Character spawn points (x, z).
+    pub characters: Vec<(f32, f32)>,
+    /// Initial trees.
+    pub trees: Vec<TreeSpec>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct TreeSpec {
+    /// Base of the tree (x, z).
+    pub pos: (f32, f32),
+    /// 0 (fresh sapling) to 1 (fully grown).
+    pub maturity: f32,
+}
+
+impl MapConfig {
+    /// Parses and validates a map from RON text.
+    pub fn from_ron(text: &str) -> Result<Self, String> {
+        let map: Self = ron::from_str(text).map_err(|e| format!("invalid map file: {e}"))?;
+        map.validate()?;
+        Ok(map)
+    }
+
+    /// Reads and parses a map file.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read map {}: {e}", path.display()))?;
+        Self::from_ron(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Distance from the center to an edge.
+    pub fn half_extent(&self) -> f32 {
+        self.size / 2.0
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if !(self.size > 0.0) {
+            return Err(format!("map size must be positive, got {}", self.size));
+        }
+        let half = self.half_extent();
+        let on_map = |(x, z): (f32, f32)| x.abs() <= half && z.abs() <= half;
+
+        for (i, &pos) in self.characters.iter().enumerate() {
+            if !on_map(pos) {
+                return Err(format!("character {i} at {pos:?} is outside the ±{half} map"));
+            }
+        }
+        for (i, tree) in self.trees.iter().enumerate() {
+            if !on_map(tree.pos) {
+                return Err(format!("tree {i} at {:?} is outside the ±{half} map", tree.pos));
+            }
+            if !(0.0..=1.0).contains(&tree.maturity) {
+                return Err(format!(
+                    "tree {i} maturity {} is not within 0..=1",
+                    tree.maturity
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for MapConfig {
+    fn default() -> Self {
+        Self::from_ron(DEFAULT_MAP).expect("built-in default map is valid")
+    }
+}
 
 /// Marker for the ground plane entity.
 #[derive(Component)]
@@ -23,17 +102,20 @@ impl Plugin for MapPlugin {
 
 fn spawn_map(
     mut commands: Commands,
+    map: Res<MapConfig>,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // Placeholder map texture. To use a real map image instead, drop it into `assets/`
-    // and replace this with: `asset_server.load("map.png")` (add `asset_server: Res<AssetServer>`).
-    let texture = images.add(checkerboard_image(512, 16));
+    let texture = match &map.texture {
+        Some(path) => asset_server.load(path.clone()),
+        None => images.add(checkerboard_image(512, 16)),
+    };
 
     commands.spawn((
         Ground,
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(MAP_SIZE, MAP_SIZE))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(map.size, map.size))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color_texture: Some(texture),
             perceptual_roughness: 1.0,

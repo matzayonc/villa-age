@@ -13,7 +13,7 @@ use bevy::picking::pointer::PointerId;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::map::MAP_SIZE;
+use crate::map::MapConfig;
 use crate::sim::SimSet;
 
 const PAN_BUTTON: MouseButton = MouseButton::Right;
@@ -98,6 +98,7 @@ fn orbit(
 
 fn pan(
     buttons: Res<ButtonInput<MouseButton>>,
+    map: Res<MapConfig>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform, &mut OrbitCamera)>,
 ) {
@@ -119,7 +120,7 @@ fn pan(
         None => orbit.grab = Some(hit),
         Some(grab) => {
             // Shift the focus so the grabbed point lands back under the cursor.
-            let half = MAP_SIZE / 2.0;
+            let half = map.half_extent();
             let focus = orbit.focus + (grab - hit);
             orbit.focus = Vec3::new(focus.x.clamp(-half, half), 0.0, focus.z.clamp(-half, half));
         }
