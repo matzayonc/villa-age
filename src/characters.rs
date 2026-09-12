@@ -2,7 +2,9 @@
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use rand::RngExt;
 
+use crate::GameRng;
 use crate::history::{Action, ActionLog};
 use crate::map::MapConfig;
 use crate::physics::character_layers;
@@ -11,8 +13,28 @@ use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 
 /// Marker for character entities.
 #[derive(Component)]
-#[require(Task, Heading, ActionLog)]
+#[require(Task, Heading, ActionLog, Strength, Speed)]
 pub struct Character;
+
+/// How hard a character chops: a multiplier on the base chop rate, rolled at spawn.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct Strength(pub f32);
+
+/// How fast a character walks: a multiplier on the base move speed, rolled at spawn.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct Speed(pub f32);
+
+impl Default for Strength {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl Default for Speed {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
 
 /// The direction the character is turned toward, smoothed over time. The transform's rotation is
 /// derived from this every frame (plus any animation on top).
@@ -32,15 +54,21 @@ pub enum Task {
     Haul { tree: Entity, rope: Entity },
 }
 
-/// World units per second.
+/// World units per second at `Speed(1.0)`.
 const MOVE_SPEED: f32 = 3.0;
+/// Spawn-time roll for each character's [`Strength`] and [`Speed`] multipliers.
+pub const STAT_RANGE: std::ops::RangeInclusive<f32> = 0.7..=1.3;
 /// Radians per second a character can turn.
 const TURN_SPEED: f32 = 5.0;
 /// How close (in XZ) a character gets to a tree's base before stopping.
 const ARRIVE_DISTANCE: f32 = TRUNK_RADIUS + RADIUS + 0.2;
+/// A character stopped at `ARRIVE_DISTANCE` still counts as arrived within this much extra, so
+/// rounding in a moving tree's base position or a nudge from physics doesn't flicker it back to
+/// walking.
+const ARRIVE_SLACK: f32 = 0.05;
 /// How close to home a character gets before dropping the log.
 const DROP_DISTANCE: f32 = 0.3;
-/// Tree health removed per second while chopping.
+/// Tree health removed per second while chopping at `Strength(1.0)`.
 const CHOP_RATE: f32 = 1.0;
 /// Chop swing animation: swings per second and lean angle in radians.
 const SWING_SPEED: f32 = 8.0;
@@ -74,10 +102,11 @@ impl Plugin for CharactersPlugin {
     }
 }
 
-/// Spawns a character at each of the map's spawn points.
+/// Spawns a character at each of the map's spawn points, each with its own rolled stats.
 fn spawn_characters(
     mut commands: Commands,
     map: Res<MapConfig>,
+    mut rng: ResMut<GameRng>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -88,12 +117,17 @@ fn spawn_characters(
     for (i, &(x, z)) in map.characters.iter().enumerate() {
         let position = Vec3::new(x, y, z);
         let color = COLORS[i % COLORS.len()];
+        let strength = Strength(rng.0.random_range(STAT_RANGE));
+        let speed = Speed(rng.0.random_range(STAT_RANGE));
+        debug!("character {} spawned with {strength:?} {speed:?}", i + 1);
         // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d` with
         // `SceneRoot(asset_server.load("character.glb#Scene0"))`.
         commands.spawn((
             Character,
             Name::new(format!("Character {}", i + 1)),
             Home(position),
+            strength,
+            speed,
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: color,
@@ -119,6 +153,7 @@ struct Walker {
     collider: &'static Collider,
     velocity: &'static mut LinearVelocity,
     heading: &'static mut Heading,
+    speed: &'static Speed,
 }
 
 impl WalkerItem<'_, '_> {
@@ -147,7 +182,7 @@ impl WalkerItem<'_, '_> {
         let dir = to_target / distance;
         let desired = Vec3::new(dir.x, 0.0, dir.y);
         let steered = self.steer(spatial, desired, ignore);
-        let speed = MOVE_SPEED.min((distance - stop_at) / dt);
+        let speed = (MOVE_SPEED * self.speed.0).min((distance - stop_at) / dt);
         self.velocity.0 = steered * speed;
         self.turn_toward(steered, dt);
         distance
@@ -221,10 +256,10 @@ fn gather(
     time: Res<Time>,
     spatial: SpatialQuery,
     mut trees: Query<(Entity, &Transform, &mut TreeState, &Maturity), Without<Character>>,
-    mut characters: Query<(Walker, &mut Task, &mut ActionLog), With<Character>>,
+    mut characters: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Character>>,
 ) {
     let now = time.elapsed_secs();
-    for (mut walker, mut task, mut log) in &mut characters {
+    for (mut walker, strength, mut task, mut log) in &mut characters {
         if !matches!(*task, Task::Gather) {
             continue;
         }
@@ -250,7 +285,7 @@ fn gather(
         };
 
         let distance = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
-        if distance > ARRIVE_DISTANCE {
+        if distance > ARRIVE_DISTANCE + ARRIVE_SLACK {
             log.record(now, Action::WalkTo { tree });
         } else {
             let to_tree = (target - pos).normalize_or(Vec2::X);
@@ -259,7 +294,7 @@ fn gather(
 
             match *state {
                 TreeState::Standing { damage } => {
-                    let damage = damage + CHOP_RATE * dt;
+                    let damage = damage + CHOP_RATE * strength.0 * dt;
                     if damage >= max_health(maturity) {
                         log.record(now, Action::AwaitFall { tree });
                         // The tree falls away from whoever felled it.

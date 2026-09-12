@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::camera::{UiHover, cursor_ray};
+use crate::characters::{Speed, Strength};
 use crate::physics::Layer;
 use crate::sim::SimSet;
 
@@ -389,7 +390,7 @@ fn render_windows(
     mut commands: Commands,
     time: Res<Time>,
     cursor: Cursor,
-    logs: Query<(&ActionLog, Option<&Name>)>,
+    logs: Query<(&ActionLog, Option<&Name>, &Strength, &Speed)>,
     mut windows: Query<(
         Entity,
         &HistoryWindow,
@@ -401,7 +402,7 @@ fn render_windows(
 ) {
     let now = time.elapsed_secs();
     for (entity, window, mut node, mut visibility, is_tooltip) in &mut windows {
-        let Some((character, (log, name))) = window
+        let Some((character, (log, name, strength, speed))) = window
             .character
             .and_then(|character| Some((character, logs.get(character).ok()?)))
         else {
@@ -427,6 +428,7 @@ fn render_windows(
                     let _ = write!(title.0, "{character}");
                 }
             }
+            let _ = write!(title.0, "   str {:.2}  spd {:.2}", strength.0, speed.0);
         }
         if let Ok(mut body) = texts.get_mut(window.body) {
             write_history(&mut body.0, log, now);

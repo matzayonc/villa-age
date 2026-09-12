@@ -1,7 +1,7 @@
 //! Headless end-to-end runs of the simulation.
 
 use bevy::prelude::*;
-use villa_age::characters::Character;
+use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
 use villa_age::history::{Action, ActionLog};
 use villa_age::trees::{MAX_TREES, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
@@ -158,8 +158,8 @@ fn character_runs_through_the_gathering_cycle() {
         .query_filtered::<Entity, With<Tree>>()
         .single(world)
         .unwrap();
-    let log = world
-        .query_filtered::<&ActionLog, With<Character>>()
+    let (log, strength, speed) = world
+        .query_filtered::<(&ActionLog, &Strength, &Speed), With<Character>>()
         .single(world)
         .unwrap();
     let actions: Vec<Action> = log.iter().map(|e| e.action).collect();
@@ -175,12 +175,21 @@ fn character_runs_through_the_gathering_cycle() {
         ]
     );
 
-    // Chopping a fully grown tree takes a few seconds; hauling it home a few more.
+    // Chopping a fully grown tree takes ~4s of work, scaled by strength; hauling it home ~0.7s
+    // of walking, scaled by speed.
     let at: Vec<f32> = log.iter().map(|e| e.at).collect();
     let chop_time = at[2] - at[1];
-    assert!((3.0..6.0).contains(&chop_time), "chop took {chop_time}s");
+    let expected_chop = 4.0 / strength.0;
+    assert!(
+        (chop_time - expected_chop).abs() < 0.1,
+        "chop took {chop_time}s, expected {expected_chop}s at {strength:?}"
+    );
     let haul_time = at[4] - at[3];
-    assert!((0.3..5.0).contains(&haul_time), "haul took {haul_time}s");
+    let expected_haul = 0.72 / speed.0;
+    assert!(
+        (haul_time - expected_haul).abs() < 0.2,
+        "haul took {haul_time}s, expected {expected_haul}s at {speed:?}"
+    );
 
     // The log ends up delivered, lying near home.
     let (state, transform) = world
@@ -190,6 +199,58 @@ fn character_runs_through_the_gathering_cycle() {
     assert!(matches!(state, TreeState::Delivered));
     let base = tree_base(transform);
     assert!(base.xz().length() < 3.0, "log left at {base}");
+}
+
+fn stats(app: &mut App) -> Vec<(f32, f32)> {
+    let world = app.world_mut();
+    let mut stats: Vec<(f32, f32)> = world
+        .query_filtered::<(&Strength, &Speed), With<Character>>()
+        .iter(world)
+        .map(|(s, v)| (s.0, v.0))
+        .collect();
+    stats.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    stats
+}
+
+#[test]
+fn character_stats_are_rolled_in_range_and_seeded() {
+    let mut a = build_app(&RunConfig {
+        headless: true,
+        seed: 3,
+        ..RunConfig::default()
+    });
+    a.update();
+    let sa = stats(&mut a);
+    assert_eq!(sa.len(), MapConfig::default().characters.len());
+    for &(strength, speed) in &sa {
+        assert!(STAT_RANGE.contains(&strength), "strength {strength}");
+        assert!(STAT_RANGE.contains(&speed), "speed {speed}");
+    }
+    let strengths: Vec<f32> = sa.iter().map(|s| s.0).collect();
+    assert!(
+        strengths.windows(2).any(|w| w[0] != w[1]),
+        "every character rolled the same strength: {strengths:?}"
+    );
+
+    let mut b = build_app(&RunConfig {
+        headless: true,
+        seed: 3,
+        ..RunConfig::default()
+    });
+    b.update();
+    assert_eq!(sa, stats(&mut b), "same seed must roll the same stats");
+
+    let mut c = build_app(&RunConfig {
+        headless: true,
+        seed: 4,
+        ..RunConfig::default()
+    });
+    c.update();
+    assert_ne!(
+        sa,
+        stats(&mut c),
+        "different seeds should roll different stats"
+    );
 }
 
 #[test]
