@@ -1,8 +1,10 @@
 //! Headless end-to-end runs of the simulation.
 
 use bevy::prelude::*;
+use std::collections::HashMap;
+
 use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
-use villa_age::history::{Action, ActionLog};
+use villa_age::history::{Action, ActionLog, Entry};
 use villa_age::trees::{MAX_TREES, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
@@ -240,21 +242,23 @@ fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
     for _ in 0..(10.0 * 60.0) as u32 {
         app.update();
         let world = app.world_mut();
-        let (transform, log) = world
-            .query_filtered::<(&Transform, &ActionLog), With<Character>>()
+        let (transform, children, log) = world
+            .query_filtered::<(&Transform, &Children, &ActionLog), With<Character>>()
             .single(world)
             .unwrap();
-        if matches!(log.current().unwrap().action, Action::Chop { .. }) {
-            let at: Vec<f32> = log.iter().map(|e| e.at).collect();
-            assert_eq!(
-                log.iter().len(),
-                2,
-                "unexpected detour: {:?}",
-                log.iter().collect::<Vec<_>>()
-            );
-            return (at[1] - at[0], max_y);
+        let entries: Vec<Entry> = log.iter().copied().collect();
+        if matches!(entries.last().unwrap().action, Action::Chop { .. }) {
+            assert_eq!(entries.len(), 2, "unexpected detour: {entries:?}");
+            return (entries[1].at - entries[0].at, max_y);
         }
-        max_y = max_y.max(transform.translation.y);
+        // The visual is a child of the body; it's what rises over a log.
+        let body_y = transform.translation.y;
+        let lift = children
+            .iter()
+            .filter_map(|child| world.get::<Transform>(child))
+            .map(|t| t.translation.y)
+            .fold(0.0, f32::max);
+        max_y = max_y.max(body_y + lift);
     }
     panic!("character never reached the tree (with_log = {with_log})");
 }
@@ -280,6 +284,46 @@ fn characters_climb_over_logs_slowly() {
     // Back on the ground once past it.
     let ground = clear_y;
     assert!(ground > 0.0);
+}
+
+/// Seconds a character may sit still while it's supposed to be walking or hauling.
+const STALL_LIMIT: f32 = 5.0;
+
+/// Nobody should freeze mid-walk: logs pile up around homes and characters cross them, and a
+/// hauled log must never hold its hauler in place.
+#[test]
+fn nobody_gets_stuck() {
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 1,
+        ..RunConfig::default()
+    });
+    let step = app.world().resource::<RunConfig>().step;
+    // Where each character was last seen moving (or doing something stationary), and when.
+    let mut last_moved: HashMap<Entity, (Vec2, f32)> = HashMap::new();
+
+    for frame in 0..(120.0 / step) as u32 {
+        app.update();
+        let now = frame as f32 * step;
+        let world = app.world_mut();
+        for (entity, transform, log) in world
+            .query_filtered::<(Entity, &Transform, &ActionLog), With<Character>>()
+            .iter(world)
+        {
+            let pos = transform.translation.xz();
+            let action = log.current().unwrap().action;
+            let should_move = matches!(action, Action::WalkTo { .. } | Action::Haul { .. });
+            let seen = last_moved.entry(entity).or_insert((pos, now));
+            if !should_move || pos.distance(seen.0) > 0.05 {
+                *seen = (pos, now);
+            }
+            let stalled = now - seen.1;
+            assert!(
+                stalled <= STALL_LIMIT,
+                "{entity} sat at {pos:.2} for {stalled:.1}s while in {action:?} (t = {now:.1}s)"
+            );
+        }
+    }
 }
 
 fn stats(app: &mut App) -> Vec<(f32, f32)> {

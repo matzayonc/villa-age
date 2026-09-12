@@ -13,8 +13,18 @@ use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 
 /// Marker for character entities.
 #[derive(Component)]
-#[require(Task, Heading, ActionLog, Strength, Speed)]
+#[require(Task, Heading, ActionLog, Strength, Speed, Climbing)]
 pub struct Character;
+
+/// Whether the character is on top of a log (its capsule overlaps one). Refreshed every frame
+/// by [`climb_logs`].
+#[derive(Component, Default, Clone, Copy, Debug, PartialEq)]
+pub struct Climbing(pub bool);
+
+/// The character's visual, a child of its body so it can rise over a log without moving the
+/// physics body (which the rope to a hauled log is anchored to).
+#[derive(Component)]
+struct CharacterMesh;
 
 /// How hard a character chops: a multiplier on the base chop rate, rolled at spawn.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -80,7 +90,7 @@ const ROPE_LENGTH: f32 = ARRIVE_DISTANCE;
 const HARVEST_MATURITY: f32 = 0.6;
 /// Walking speed multiplier while climbing over a log.
 const CLIMB_SPEED_FACTOR: f32 = 0.35;
-/// How much a character rises while on top of a log (the log's radius).
+/// How much a character's visual rises while on top of a log (the log's radius).
 const CLIMB_HEIGHT: f32 = TRUNK_RADIUS;
 /// Steering: how far ahead to look for obstacles, and how hard to swerve around them.
 const LOOKAHEAD: f32 = 2.5;
@@ -103,8 +113,12 @@ pub struct CharactersPlugin;
 
 impl Plugin for CharactersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_characters)
-            .add_systems(Update, (gather, haul).chain().in_set(SimSet::Characters));
+        app.add_systems(Startup, spawn_characters).add_systems(
+            Update,
+            (climb_logs, gather, haul)
+                .chain()
+                .in_set(SimSet::Characters),
+        );
     }
 }
 
@@ -124,27 +138,32 @@ fn spawn_characters(
         let strength = Strength(rng.0.random_range(STAT_RANGE));
         let speed = Speed(rng.0.random_range(STAT_RANGE));
         debug!("character {} spawned with {strength:?} {speed:?}", i + 1);
-        // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d` with
-        // `SceneRoot(asset_server.load("character.glb#Scene0"))`.
-        commands.spawn((
-            Character,
-            Name::new(format!("Character {}", i + 1)),
-            Home(position),
-            strength,
-            speed,
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
-                ..default()
-            })),
-            Transform::from_translation(position),
-            RigidBody::Dynamic,
-            Collider::capsule(RADIUS, HEIGHT),
-            // Rotation is driven by `Heading`, not physics.
-            LockedAxes::ROTATION_LOCKED.lock_translation_y(),
-            character_layers(),
-            Mass(80.0),
-        ));
+        commands
+            .spawn((
+                Character,
+                Name::new(format!("Character {}", i + 1)),
+                Home(position),
+                strength,
+                speed,
+                Transform::from_translation(position),
+                Visibility::default(),
+                RigidBody::Dynamic,
+                Collider::capsule(RADIUS, HEIGHT),
+                // Rotation is driven by `Heading`, not physics.
+                LockedAxes::ROTATION_LOCKED.lock_translation_y(),
+                character_layers(),
+                Mass(80.0),
+            ))
+            .with_child((
+                CharacterMesh,
+                // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d`
+                // with `SceneRoot(asset_server.load("character.glb#Scene0"))`.
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: color,
+                    ..default()
+                })),
+            ));
     }
 }
 
@@ -158,6 +177,7 @@ struct Walker {
     velocity: &'static mut LinearVelocity,
     heading: &'static mut Heading,
     speed: &'static Speed,
+    climbing: &'static Climbing,
 }
 
 impl WalkerItem<'_, '_> {
@@ -167,22 +187,10 @@ impl WalkerItem<'_, '_> {
         self.heading.0 = self.heading.0.rotate_towards(target, TURN_SPEED * dt);
     }
 
-    /// Whether the character is on top of a log (its capsule overlaps one).
-    fn on_log(&self, spatial: &SpatialQuery) -> bool {
-        !spatial
-            .shape_intersections(
-                self.collider,
-                self.transform.translation,
-                Quat::IDENTITY,
-                &SpatialQueryFilter::from_mask(Layer::Log),
-            )
-            .is_empty()
-    }
-
-    /// Sets the velocity to move toward `target` (in XZ) without overshooting, steering around
-    /// anything in the way except `ignore`; returns the remaining distance. Stops when within
-    /// `stop_at`. Logs aren't steered around but climbed over, which is slow and lifts the
-    /// character while it's on one.
+    /// Sets the velocity to move toward `target` (in XZ), steering around anything in the way
+    /// except `ignore`; logs aren't steered around but climbed over, slowly. Aims to stop at
+    /// `stop_at` from the target and returns whether it has arrived, which allows `ARRIVE_SLACK`
+    /// beyond `stop_at` so the physics step landing a hair short can't leave it creeping forever.
     fn walk_toward(
         &mut self,
         spatial: &SpatialQuery,
@@ -190,31 +198,24 @@ impl WalkerItem<'_, '_> {
         stop_at: f32,
         ignore: Option<Entity>,
         dt: f32,
-    ) -> f32 {
-        let climbing = self.on_log(spatial);
-        self.transform.translation.y = if climbing {
-            GROUND_Y + CLIMB_HEIGHT
-        } else {
-            GROUND_Y
-        };
-
+    ) -> bool {
         let to_target = target - self.transform.translation.xz();
         let distance = to_target.length();
-        if distance <= stop_at {
+        if distance <= stop_at + ARRIVE_SLACK {
             self.velocity.0 = Vec3::ZERO;
-            return distance;
+            return true;
         }
         let dir = to_target / distance;
         let desired = Vec3::new(dir.x, 0.0, dir.y);
         let steered = self.steer(spatial, desired, ignore);
         let mut max_speed = MOVE_SPEED * self.speed.0;
-        if climbing {
+        if self.climbing.0 {
             max_speed *= CLIMB_SPEED_FACTOR;
         }
         let speed = max_speed.min((distance - stop_at) / dt);
         self.velocity.0 = steered * speed;
         self.turn_toward(steered, dt);
-        distance
+        false
     }
 
     /// Local obstacle avoidance: casts this character's shape along `desired` and, if something is
@@ -279,6 +280,33 @@ fn choose_tree<'a>(
         .map(|(_, tree)| tree)
 }
 
+/// Notes which characters are standing on a log and lifts their visuals onto it.
+fn climb_logs(
+    spatial: SpatialQuery,
+    mut characters: Query<(&Transform, &Collider, &mut Climbing, &Children), With<Character>>,
+    mut meshes: Query<&mut Transform, (With<CharacterMesh>, Without<Character>)>,
+) {
+    for (transform, collider, mut climbing, children) in &mut characters {
+        let on_log = !spatial
+            .shape_intersections(
+                collider,
+                transform.translation,
+                Quat::IDENTITY,
+                &SpatialQueryFilter::from_mask(Layer::Log),
+            )
+            .is_empty();
+        if climbing.0 != on_log {
+            climbing.0 = on_log;
+        }
+        let lift = if on_log { CLIMB_HEIGHT } else { 0.0 };
+        for &child in children {
+            if let Ok(mut mesh) = meshes.get_mut(child) {
+                mesh.translation.y = lift;
+            }
+        }
+    }
+}
+
 /// Walks each gathering character to its chosen tree, chops it, and picks it up once fallen.
 fn gather(
     mut commands: Commands,
@@ -313,8 +341,8 @@ fn gather(
             continue;
         };
 
-        let distance = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
-        if distance > ARRIVE_DISTANCE + ARRIVE_SLACK {
+        let arrived = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
+        if !arrived {
             log.record(now, Action::WalkTo { tree });
         } else {
             let to_tree = (target - pos).normalize_or(Vec2::X);
@@ -348,7 +376,7 @@ fn gather(
                     // log is only pulled once the rope is taut, so grabbing doesn't move it.
                     let log_base = tree_base(tree_transform);
                     let hand = Vec3::Y * (log_base.y - walker.transform.translation.y);
-                    let slack = ROPE_LENGTH.max(distance);
+                    let slack = ROPE_LENGTH.max(target.distance(pos));
                     let mut joint = DistanceJoint::new(walker.entity, tree)
                         .with_local_anchor1(hand)
                         .with_limits(0.0, slack);
@@ -390,7 +418,7 @@ fn haul(
             continue;
         }
 
-        let remaining = walker.walk_toward(
+        let arrived = walker.walk_toward(
             &spatial,
             home.0.xz(),
             DROP_DISTANCE,
@@ -399,7 +427,7 @@ fn haul(
         );
         walker.transform.rotation = walker.heading.0;
 
-        if remaining <= DROP_DISTANCE {
+        if arrived {
             // Let go: the log freezes exactly where it was dragged to.
             commands.entity(rope).despawn();
             if let Ok(mut state) = trees.get_mut(tree) {
