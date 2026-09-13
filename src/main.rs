@@ -13,7 +13,8 @@ struct Cli {
     /// World seed; the same seed reproduces the same run.
     #[arg(long, default_value_t = 0x5EED_1234)]
     seed: u64,
-    /// Initial fast-forward factor (windowed runs). `]` / `[` change it at runtime.
+    /// Initial fast-forward factor (windowed runs). At runtime the number keys pick a power of two
+    /// (`1`…`9`, `0` for 1× … 512×) and `]` / `[` double / halve it.
     #[arg(long, default_value_t = 1.0)]
     speed: f32,
     /// Don't wait for the display's refresh between frames.

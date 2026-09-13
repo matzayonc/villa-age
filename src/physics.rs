@@ -22,14 +22,27 @@ pub enum Layer {
     Log,
     /// A log being dragged: passes through everything, it's held by a joint instead.
     Carried,
+    /// Small animals: bump into trees and people (and get shoved aside), but nobody plans
+    /// around them.
+    Critter,
 }
 
 pub fn character_layers() -> CollisionLayers {
-    CollisionLayers::new(Layer::Character, [Layer::Character, Layer::Obstacle])
+    CollisionLayers::new(
+        Layer::Character,
+        [Layer::Character, Layer::Obstacle, Layer::Critter],
+    )
 }
 
 pub fn obstacle_layers() -> CollisionLayers {
-    CollisionLayers::new(Layer::Obstacle, [Layer::Character])
+    CollisionLayers::new(Layer::Obstacle, [Layer::Character, Layer::Critter])
+}
+
+pub fn critter_layers() -> CollisionLayers {
+    CollisionLayers::new(
+        Layer::Critter,
+        [Layer::Critter, Layer::Character, Layer::Obstacle],
+    )
 }
 
 pub fn log_layers() -> CollisionLayers {
@@ -40,10 +53,12 @@ pub fn carried_layers() -> CollisionLayers {
     CollisionLayers::new(Layer::Carried, LayerMask::NONE)
 }
 
-/// What a walking character looks ahead for and swerves around: everything it can't walk over.
+/// What a walking character looks ahead for and swerves around: everything it can't walk over
+/// or simply push out of the way.
 pub fn steer_mask() -> LayerMask {
     let mut mask = LayerMask::ALL;
     mask.remove(Layer::Log);
+    mask.remove(Layer::Critter);
     mask
 }
 
@@ -134,6 +149,15 @@ mod tests {
         assert!(character_layers().interacts_with(character_layers()));
         assert!(!character_layers().interacts_with(log_layers()));
         assert!(!character_layers().interacts_with(carried_layers()));
+    }
+
+    #[test]
+    fn critters_bump_into_trees_and_people() {
+        assert!(critter_layers().interacts_with(obstacle_layers()));
+        assert!(critter_layers().interacts_with(character_layers()));
+        assert!(critter_layers().interacts_with(critter_layers()));
+        assert!(!critter_layers().interacts_with(log_layers()));
+        assert!(!steer_mask().has_all(Layer::Critter));
     }
 
     #[test]

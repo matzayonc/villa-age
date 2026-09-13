@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
 use villa_age::history::{Action, ActionLog, Entry};
+use villa_age::rabbits::{Breeding, MAX_RABBITS, Rabbit};
 use villa_age::trees::{MAX_TREES, Maturity, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
@@ -408,6 +409,119 @@ fn map_rejects_out_of_bounds_tree() {
     assert!(err.contains("tree 0"), "unexpected error: {err}");
 }
 
+/// Rabbits wander in short hops with rests in between: over a minute each one covers plenty of
+/// ground, but on any given step most of them are sitting still, and none leaves the map.
+#[test]
+fn rabbits_hop_about_and_stay_on_the_map() {
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 3,
+        ..RunConfig::default()
+    });
+    app.update();
+    let world = app.world_mut();
+    let start: Vec<(Entity, Vec3)> = world
+        .query_filtered::<(Entity, &Position), With<Rabbit>>()
+        .iter(world)
+        .map(|(e, p)| (e, p.0))
+        .collect();
+    assert_eq!(start.len(), MapConfig::default().rabbits.len());
+
+    let half = MapConfig::default().half_extent();
+    let step_secs = app.world().resource::<RunConfig>().step as f32;
+    let mut resting_steps = 0;
+    let mut total_steps = 0;
+    // Distance covered per rabbit, and where it was last step.
+    let mut travelled: HashMap<Entity, (f32, Vec2)> = start
+        .iter()
+        .map(|&(entity, origin)| (entity, (0.0, origin.xz())))
+        .collect();
+    for _ in 0..(60.0 / step_secs) as u32 {
+        app.update();
+        let world = app.world_mut();
+        for (entity, position, velocity) in world
+            .query_filtered::<(Entity, &Position, &LinearVelocity), With<Rabbit>>()
+            .iter(world)
+        {
+            assert!(
+                position.x.abs() <= half && position.z.abs() <= half,
+                "rabbit left the map at {}",
+                position.0
+            );
+            assert!(
+                (position.y - start[0].1.y).abs() < 1e-3,
+                "rabbit left the ground: y = {}",
+                position.y
+            );
+            total_steps += 1;
+            if velocity.0 == Vec3::ZERO {
+                resting_steps += 1;
+            }
+            let (distance, last) = travelled.get_mut(&entity).unwrap();
+            *distance += last.distance(position.xz());
+            *last = position.xz();
+        }
+    }
+    // Hops are short bursts: most of the time is spent sitting.
+    assert!(
+        resting_steps * 2 > total_steps,
+        "rabbits rested only {resting_steps} of {total_steps} rabbit-steps"
+    );
+
+    for (entity, (distance, _)) in travelled {
+        assert!(
+            distance > 10.0,
+            "rabbit {entity} covered only {distance:.1}m in a minute"
+        );
+    }
+}
+
+/// Ready rabbits find each other and have kits, which grow up; the population is capped.
+#[test]
+fn rabbits_breed_up_to_the_cap() {
+    let map = MapConfig::from_ron(
+        "(size: 20.0, characters: [], trees: [], rabbits: [(-3.0, 0.0), (3.0, 0.0), (0.0, 3.0), (0.0, -3.0)])",
+    )
+    .unwrap();
+    let initial = map.rabbits.len();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 4,
+        map,
+        ..RunConfig::default()
+    });
+    step(&mut app, 120.0);
+
+    let world = app.world_mut();
+    let rabbits: Vec<(&Rabbit, &Breeding)> =
+        world.query::<(&Rabbit, &Breeding)>().iter(world).collect();
+    let kits = rabbits
+        .iter()
+        .filter(|(_, b)| matches!(b, Breeding::Growing { .. }))
+        .count();
+    assert!(
+        rabbits.len() > initial,
+        "expected kits beyond the initial {initial}, got {}",
+        rabbits.len()
+    );
+    assert!(kits > 0, "no kit still growing after 2 minutes");
+    for (rabbit, breeding) in &rabbits {
+        let grown = !matches!(breeding, Breeding::Growing { .. });
+        assert!(
+            grown == (rabbit.size >= 1.0),
+            "size {} doesn't match growth state",
+            rabbit.size
+        );
+    }
+
+    // Left running, the warren fills up but never goes past the cap.
+    step(&mut app, 600.0);
+    let world = app.world_mut();
+    let count = world.query::<&Rabbit>().iter(world).count();
+    assert!(count > initial * 2, "warren stayed small: {count}");
+    assert!(count <= MAX_RABBITS, "rabbit cap exceeded: {count}");
+}
+
 /// Load test: 1 000 characters among 10 000 trees. Ignored by default because it takes seconds
 /// even in release; run with `cargo test --release --test simulation heavy -- --ignored --nocapture`
 /// to get the timing report.
@@ -452,6 +566,7 @@ fn heavy_world_keeps_stepping() {
         texture: None,
         characters,
         trees,
+        rabbits: vec![],
     };
 
     let build_start = Instant::now();

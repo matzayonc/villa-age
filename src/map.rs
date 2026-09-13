@@ -27,6 +27,9 @@ pub struct MapConfig {
     pub characters: Vec<(f32, f32)>,
     /// Initial trees.
     pub trees: Vec<TreeSpec>,
+    /// Rabbit spawn points (x, z).
+    #[serde(default)]
+    pub rabbits: Vec<(f32, f32)>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -69,6 +72,11 @@ impl MapConfig {
                 return Err(format!(
                     "character {i} at {pos:?} is outside the ±{half} map"
                 ));
+            }
+        }
+        for (i, &pos) in self.rabbits.iter().enumerate() {
+            if !on_map(pos) {
+                return Err(format!("rabbit {i} at {pos:?} is outside the ±{half} map"));
             }
         }
         for (i, tree) in self.trees.iter().enumerate() {

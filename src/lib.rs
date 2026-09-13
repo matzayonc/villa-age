@@ -19,6 +19,7 @@ pub mod characters;
 pub mod history;
 pub mod map;
 pub mod physics;
+pub mod rabbits;
 pub mod sim;
 pub mod trees;
 
@@ -122,6 +123,7 @@ pub fn build_app(config: &RunConfig) -> App {
             map::MapPlugin,
             trees::TreesPlugin,
             characters::CharactersPlugin,
+            rabbits::RabbitsPlugin,
             history::HistoryPlugin,
         ));
 

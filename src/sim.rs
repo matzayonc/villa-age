@@ -6,6 +6,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::RunConfig;
+use crate::rabbits::Rabbit;
 use crate::trees::{Tree, TreeState};
 
 /// Order of the gameplay systems within `Update`. Fixed so a seed reproduces a run.
@@ -13,12 +14,26 @@ use crate::trees::{Tree, TreeState};
 pub enum SimSet {
     Trees,
     Characters,
+    Critters,
     History,
     Camera,
 }
 
-/// Fast-forward factors cycled with `]` and `[`.
-const SPEEDS: [f32; 4] = [1.0, 4.0, 16.0, 64.0];
+/// Fast-forward factors are powers of two: the number keys pick `1`→1×, `2`→2×, `3`→4× … `9`→256×,
+/// `0`→512×, and `]` / `[` double / halve within the same range.
+const MAX_SPEED_EXPONENT: u32 = 9;
+const NUMBER_KEYS: [KeyCode; 10] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+    KeyCode::Digit0,
+];
 /// Simulated seconds between stats lines.
 const STATS_INTERVAL: f32 = 10.0;
 
@@ -39,6 +54,7 @@ impl Plugin for SimPlugin {
             (
                 SimSet::Trees,
                 SimSet::Characters,
+                SimSet::Critters,
                 SimSet::History,
                 SimSet::Camera,
             )
@@ -85,25 +101,34 @@ fn apply_speed(time: &mut Time<Virtual>, speed: f32, step: f32) {
     time.set_max_delta(max_delta.max(Duration::from_millis(250)));
 }
 
-/// `]` / `[` cycle the fast-forward factor, `Space` pauses.
+/// Number keys set the fast-forward factor (`1`…`9`, `0` for 2⁰…2⁹), `]` / `[` double / halve it,
+/// `Space` pauses.
 fn fast_forward_keys(
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<RunConfig>,
     mut ff: ResMut<FastForward>,
     mut time: ResMut<Time<Virtual>>,
 ) {
-    let index = SPEEDS
-        .iter()
-        .position(|&s| s >= ff.speed)
-        .unwrap_or(SPEEDS.len() - 1);
-    let mut changed = false;
-    if keys.just_pressed(KeyCode::BracketRight) && index + 1 < SPEEDS.len() {
-        ff.speed = SPEEDS[index + 1];
-        changed = true;
+    // The current setting as an exponent; a `--speed` that isn't a power of two rounds to the
+    // nearest one the first time a key is pressed.
+    let exponent = ff.speed.max(1.0).log2().round() as u32;
+    let mut wanted = None;
+    if let Some(n) = NUMBER_KEYS.iter().position(|&key| keys.just_pressed(key)) {
+        wanted = Some(n as u32);
     }
-    if keys.just_pressed(KeyCode::BracketLeft) && index > 0 {
-        ff.speed = SPEEDS[index - 1];
-        changed = true;
+    if keys.just_pressed(KeyCode::BracketRight) && exponent < MAX_SPEED_EXPONENT {
+        wanted = Some(exponent + 1);
+    }
+    if keys.just_pressed(KeyCode::BracketLeft) && exponent > 0 {
+        wanted = Some(exponent - 1);
+    }
+    let mut changed = false;
+    if let Some(exponent) = wanted {
+        let speed = 2f32.powi(exponent as i32);
+        if speed != ff.speed {
+            ff.speed = speed;
+            changed = true;
+        }
     }
     if keys.just_pressed(KeyCode::Space) {
         ff.paused = !ff.paused;
@@ -155,6 +180,7 @@ fn report_stats(
     time: Res<Time<Virtual>>,
     mut stats: ResMut<Stats>,
     trees: Query<&TreeState, With<Tree>>,
+    rabbits: Query<(), With<Rabbit>>,
     bodies: Query<(), With<RigidBody>>,
 ) {
     let sim = time.elapsed_secs();
@@ -177,9 +203,10 @@ fn report_stats(
     }
     let wall = stats.started.elapsed().as_secs_f32();
     info!(
-        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | {fps:.0} fps | trees {} (standing {standing}, delivered {delivered}) | bodies {}",
+        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | {fps:.0} fps | trees {} (standing {standing}, delivered {delivered}) | rabbits {} | bodies {}",
         sim / wall.max(1e-3),
         trees.iter().len(),
+        rabbits.iter().len(),
         bodies.iter().len(),
     );
 }
