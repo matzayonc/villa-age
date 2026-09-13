@@ -71,10 +71,25 @@ fn characters_deliver_logs() {
     );
 }
 
+/// Mature trees left alone drop saplings. No characters on this map, so regrowth can't lose a
+/// race against the loggers.
 #[test]
 fn forest_regrows_within_cap() {
-    let initial = MapConfig::default().trees.len();
-    let mut app = run_headless(2, 60.0);
+    let map = MapConfig::from_ron(
+        "(size: 30.0, characters: [], trees: [
+            (pos: (-6.0, -6.0), maturity: 1.0), (pos: (6.0, -6.0), maturity: 1.0),
+            (pos: (-6.0, 6.0), maturity: 1.0), (pos: (6.0, 6.0), maturity: 1.0),
+        ])",
+    )
+    .unwrap();
+    let initial = map.trees.len();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 2,
+        map,
+        ..RunConfig::default()
+    });
+    step(&mut app, 60.0);
     let trees = tree_count(&mut app);
     assert!(
         trees > initial,
@@ -385,4 +400,105 @@ fn map_rejects_out_of_bounds_tree() {
     )
     .unwrap_err();
     assert!(err.contains("tree 0"), "unexpected error: {err}");
+}
+
+/// Load test: 1 000 characters among 10 000 trees. Ignored by default because it takes seconds
+/// even in release; run with `cargo test --release --test simulation heavy -- --ignored --nocapture`
+/// to get the timing report.
+#[test]
+#[ignore = "benchmark: run explicitly with --ignored --nocapture"]
+fn heavy_world_keeps_stepping() {
+    use std::time::Instant;
+    use villa_age::map::TreeSpec;
+
+    const TREES_PER_SIDE: usize = 100;
+    const TREE_SPACING: f32 = 3.0;
+    const CHARACTERS: usize = 1_000;
+    const SIM_SECONDS: f32 = 30.0;
+
+    // Trees on a square grid; characters at the centres of a subset of the cells, so each sits
+    // on the diagonal between four trees and never inside a trunk.
+    let origin = -(TREES_PER_SIDE as f32 - 1.0) * TREE_SPACING / 2.0;
+    let trees: Vec<TreeSpec> = (0..TREES_PER_SIDE * TREES_PER_SIDE)
+        .map(|i| {
+            let (x, z) = ((i % TREES_PER_SIDE) as f32, (i / TREES_PER_SIDE) as f32);
+            TreeSpec {
+                pos: (origin + x * TREE_SPACING, origin + z * TREE_SPACING),
+                maturity: 0.5 + 0.5 * ((i * 7919) % 100) as f32 / 100.0,
+            }
+        })
+        .collect();
+    let chars_per_side = (CHARACTERS as f32).sqrt().ceil() as usize;
+    let cell_centre = |k: usize| {
+        let cell = k * (TREES_PER_SIDE - 1) / chars_per_side;
+        origin + (cell as f32 + 0.5) * TREE_SPACING
+    };
+    let characters: Vec<(f32, f32)> = (0..CHARACTERS)
+        .map(|i| {
+            (
+                cell_centre(i % chars_per_side),
+                cell_centre(i / chars_per_side),
+            )
+        })
+        .collect();
+    let map = MapConfig {
+        size: TREES_PER_SIDE as f32 * TREE_SPACING + 8.0,
+        texture: None,
+        characters,
+        trees,
+    };
+
+    let build_start = Instant::now();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 42,
+        map,
+        ..RunConfig::default()
+    });
+    let build = build_start.elapsed();
+
+    let first_frame_start = Instant::now();
+    app.update();
+    let first_frame = first_frame_start.elapsed();
+
+    let step_secs = app.world().resource::<RunConfig>().step;
+    let frames = (SIM_SECONDS / step_secs).ceil() as u32;
+    let run_start = Instant::now();
+    for _ in 0..frames {
+        app.update();
+    }
+    let run = run_start.elapsed();
+
+    let trees = tree_count(&mut app);
+    let chars = app
+        .world_mut()
+        .query_filtered::<(), With<Character>>()
+        .iter(app.world())
+        .count();
+    let delivered = count_state(&mut app, |s| matches!(s, TreeState::Delivered));
+    // Logs that slipped away mid-haul: a sign the rope or arrival logic is struggling.
+    let lost: usize = app
+        .world_mut()
+        .query::<&ActionLog>()
+        .iter(app.world())
+        .map(|log| {
+            log.iter()
+                .filter(|e| matches!(e.action, Action::LostLog { .. }))
+                .count()
+        })
+        .sum();
+
+    let per_frame = run / frames;
+    eprintln!(
+        "heavy world: {chars} characters, {trees} trees\n  \
+         build app        {build:>9.2?}\n  \
+         first frame      {first_frame:>9.2?}  (startup systems + spawning)\n  \
+         {frames} frames      {run:>9.2?}  ({per_frame:.2?}/frame, {:.1}x realtime)\n  \
+         delivered logs   {delivered}  (lost mid-haul: {lost})",
+        SIM_SECONDS / run.as_secs_f32(),
+    );
+
+    assert_eq!(chars, CHARACTERS);
+    assert_eq!(trees, TREES_PER_SIDE * TREES_PER_SIDE);
+    assert!(delivered > 0, "nobody delivered a log in {SIM_SECONDS}s");
 }

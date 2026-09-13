@@ -55,13 +55,20 @@ pub struct Heading(Quat);
 #[derive(Component)]
 pub struct Home(pub Vec3);
 
-#[derive(Component, Default)]
+#[derive(Component)]
 pub enum Task {
-    /// Walk to the nearest usable tree; chop it if standing, pick it up if fallen.
-    #[default]
-    Gather,
+    /// Walk to `target`, chop it if standing, pick it up if fallen. The target is chosen (the
+    /// nearest usable tree) when there is none and kept until it stops being usable, so the
+    /// choice isn't recomputed over every tree each frame.
+    Gather { target: Option<Entity> },
     /// Drag `tree` back home; `rope` is the joint entity holding it.
     Haul { tree: Entity, rope: Entity },
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        Self::Gather { target: None }
+    }
 }
 
 /// World units per second at `Speed(1.0)`.
@@ -146,6 +153,8 @@ fn spawn_characters(
                 strength,
                 speed,
                 Transform::from_translation(position),
+                // Bodies start with their physics position set explicitly (see `physics.rs`).
+                Position(position),
                 Visibility::default(),
                 RigidBody::Dynamic,
                 Collider::capsule(RADIUS, HEIGHT),
@@ -191,6 +200,9 @@ impl WalkerItem<'_, '_> {
     /// except `ignore`; logs aren't steered around but climbed over, slowly. Aims to stop at
     /// `stop_at` from the target and returns whether it has arrived, which allows `ARRIVE_SLACK`
     /// beyond `stop_at` so the physics step landing a hair short can't leave it creeping forever.
+    ///
+    /// `dt` is this frame's delta (turning happens per frame); `physics_step` is how long the
+    /// velocity will be applied for, which sets how fast the last stretch can be taken.
     fn walk_toward(
         &mut self,
         spatial: &SpatialQuery,
@@ -198,6 +210,7 @@ impl WalkerItem<'_, '_> {
         stop_at: f32,
         ignore: Option<Entity>,
         dt: f32,
+        physics_step: f32,
     ) -> bool {
         let to_target = target - self.transform.translation.xz();
         let distance = to_target.length();
@@ -212,7 +225,7 @@ impl WalkerItem<'_, '_> {
         if self.climbing.0 {
             max_speed *= CLIMB_SPEED_FACTOR;
         }
-        let speed = max_speed.min((distance - stop_at) / dt);
+        let speed = max_speed.min((distance - stop_at) / physics_step);
         self.velocity.0 = steered * speed;
         self.turn_toward(steered, dt);
         false
@@ -255,6 +268,19 @@ struct TreeInfo<'a> {
     base: Vec2,
     state: &'a TreeState,
     maturity: Maturity,
+}
+
+impl<'a> From<(Entity, &Transform, &'a TreeState, &Maturity)> for TreeInfo<'a> {
+    fn from(
+        (entity, transform, state, &maturity): (Entity, &Transform, &'a TreeState, &Maturity),
+    ) -> Self {
+        Self {
+            entity,
+            base: tree_base(transform).xz(),
+            state,
+            maturity,
+        }
+    }
 }
 
 /// How attractive a tree is to a character standing at `pos`: lower is better, `None` means it is
@@ -311,37 +337,47 @@ fn climb_logs(
 fn gather(
     mut commands: Commands,
     time: Res<Time>,
+    physics_time: Res<Time<Fixed>>,
     spatial: SpatialQuery,
     mut trees: Query<(Entity, &Transform, &mut TreeState, &Maturity), Without<Character>>,
     mut characters: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Character>>,
 ) {
     let now = time.elapsed_secs();
     for (mut walker, strength, mut task, mut log) in &mut characters {
-        if !matches!(*task, Task::Gather) {
+        let Task::Gather { target: current } = &mut *task else {
             continue;
-        }
+        };
         let pos = walker.transform.translation.xz();
         let dt = time.delta_secs();
         // Chop swing angle applied on top of the heading this frame.
         let mut swing = 0.0;
 
-        let candidates = trees.iter().map(|(entity, t, state, &maturity)| TreeInfo {
-            entity,
-            base: tree_base(t).xz(),
-            state,
-            maturity,
-        });
-        let Some(chosen) = choose_tree(pos, candidates) else {
+        // Stick with the current target while it's still usable; only scan the whole forest
+        // when there is none or someone else got to it first.
+        let still_usable = current
+            .and_then(|tree| trees.get(tree).ok())
+            .is_some_and(|tree| tree_priority(pos, &TreeInfo::from(tree)).is_some());
+        if !still_usable {
+            *current = choose_tree(pos, trees.iter().map(TreeInfo::from)).map(|tree| tree.entity);
+        }
+        let Some(tree) = *current else {
             walker.velocity.0 = Vec3::ZERO;
             log.record(now, Action::Idle);
             continue;
         };
-        let (tree, target) = (chosen.entity, chosen.base);
         let Ok((_, tree_transform, mut state, &maturity)) = trees.get_mut(tree) else {
             continue;
         };
+        let target = tree_base(tree_transform).xz();
 
-        let arrived = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
+        let arrived = walker.walk_toward(
+            &spatial,
+            target,
+            ARRIVE_DISTANCE,
+            Some(tree),
+            dt,
+            physics_time.delta_secs(),
+        );
         if !arrived {
             log.record(now, Action::WalkTo { tree });
         } else {
@@ -398,6 +434,7 @@ fn gather(
 fn haul(
     mut commands: Commands,
     time: Res<Time>,
+    physics_time: Res<Time<Fixed>>,
     spatial: SpatialQuery,
     mut trees: Query<&mut TreeState, Without<Character>>,
     mut characters: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Character>>,
@@ -413,7 +450,7 @@ fn haul(
         );
         if !owned {
             commands.entity(rope).despawn();
-            *task = Task::Gather;
+            *task = Task::default();
             log.record(now, Action::LostLog { tree });
             continue;
         }
@@ -424,6 +461,7 @@ fn haul(
             DROP_DISTANCE,
             Some(tree),
             time.delta_secs(),
+            physics_time.delta_secs(),
         );
         walker.transform.rotation = walker.heading.0;
 
@@ -433,7 +471,7 @@ fn haul(
             if let Ok(mut state) = trees.get_mut(tree) {
                 *state = TreeState::Delivered;
             }
-            *task = Task::Gather;
+            *task = Task::default();
             log.record(now, Action::Deliver { tree });
         }
     }

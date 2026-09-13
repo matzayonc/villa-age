@@ -13,7 +13,7 @@ use bevy::window::PrimaryWindow;
 use crate::camera::{UiHover, cursor_ray};
 use crate::characters::{Speed, Strength};
 use crate::physics::Layer;
-use crate::sim::SimSet;
+use crate::sim::{SimSet, is_headless};
 
 /// What a character is doing. Each variant names the tree involved, if any.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +125,11 @@ pub struct HistoryPlugin;
 
 impl Plugin for HistoryPlugin {
     fn build(&self, app: &mut App) {
+        // The history itself is just the `ActionLog` component; the windows showing it need a
+        // window, UI and picking, none of which exist headless.
+        if is_headless(app) {
+            return;
+        }
         app.init_resource::<WindowStack>()
             .add_systems(Startup, spawn_tooltip)
             .add_systems(

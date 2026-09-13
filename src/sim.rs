@@ -45,16 +45,20 @@ impl Plugin for SimPlugin {
         )
         .init_resource::<Stats>()
         .add_systems(Startup, apply_initial_speed)
-        .add_systems(
-            Update,
-            (
-                fast_forward_keys,
-                update_title,
-                report_stats,
-                exit_when_done,
-            ),
-        );
+        .add_systems(Update, (report_stats, exit_when_done));
+
+        // Keyboard control needs the input plugin, which headless runs don't have.
+        if !is_headless(app) {
+            app.add_systems(Update, (fast_forward_keys, update_title));
+        }
     }
+}
+
+/// Whether the app being built runs without a window.
+pub fn is_headless(app: &App) -> bool {
+    app.world()
+        .get_resource::<RunConfig>()
+        .is_some_and(|c| c.headless)
 }
 
 fn apply_initial_speed(
@@ -128,6 +132,9 @@ fn update_title(ff: Res<FastForward>, mut window: Single<&mut Window>) {
 struct Stats {
     started: Instant,
     next_report: f32,
+    /// Frames and wall time since the last report, for the frame rate.
+    frames: u32,
+    last_report: Instant,
 }
 
 impl Default for Stats {
@@ -135,6 +142,8 @@ impl Default for Stats {
         Self {
             started: Instant::now(),
             next_report: 0.0,
+            frames: 0,
+            last_report: Instant::now(),
         }
     }
 }
@@ -146,10 +155,14 @@ fn report_stats(
     bodies: Query<(), With<RigidBody>>,
 ) {
     let sim = time.elapsed_secs();
+    stats.frames += 1;
     if sim < stats.next_report {
         return;
     }
     stats.next_report = sim + STATS_INTERVAL;
+    let fps = stats.frames as f32 / stats.last_report.elapsed().as_secs_f32().max(1e-3);
+    stats.frames = 0;
+    stats.last_report = Instant::now();
 
     let (mut standing, mut delivered) = (0, 0);
     for state in &trees {
@@ -161,7 +174,7 @@ fn report_stats(
     }
     let wall = stats.started.elapsed().as_secs_f32();
     info!(
-        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | trees {} (standing {standing}, delivered {delivered}) | bodies {}",
+        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | {fps:.0} fps | trees {} (standing {standing}, delivered {delivered}) | bodies {}",
         sim / wall.max(1e-3),
         trees.iter().len(),
         bodies.iter().len(),

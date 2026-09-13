@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use villa_age::{MapConfig, RunConfig, build_app};
+use villa_age::{MapConfig, RunConfig, WINDOWED_PHYSICS_HZ, build_app};
 
 /// Villa Age.
 #[derive(Parser)]
@@ -25,9 +25,10 @@ struct Cli {
     /// Headless: simulated seconds per frame (coarser is faster).
     #[arg(long, default_value_t = 1.0 / 60.0)]
     step: f32,
-    /// Physics steps per simulated second (lower is faster, less accurate).
-    #[arg(long, default_value_t = 64.0)]
-    physics_hz: f64,
+    /// Physics steps per simulated second (lower is faster, less accurate). Defaults to 20 headless
+    /// and 64 windowed.
+    #[arg(long)]
+    physics_hz: Option<f64>,
     /// Map definition (.ron); the built-in default map when omitted.
     #[arg(long)]
     map: Option<PathBuf>,
@@ -49,7 +50,11 @@ fn main() {
         vsync: !cli.no_vsync,
         duration: cli.duration,
         step: cli.step,
-        physics_hz: cli.physics_hz,
+        physics_hz: cli.physics_hz.unwrap_or(if cli.headless {
+            RunConfig::default().physics_hz
+        } else {
+            WINDOWED_PHYSICS_HZ
+        }),
         map,
     };
     build_app(&config).run();

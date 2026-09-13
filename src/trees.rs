@@ -45,9 +45,12 @@ impl Default for TreeState {
 pub struct Maturity(pub f32);
 
 impl Maturity {
-    /// Uniform scale of the tree entity.
+    /// Uniform scale of the tree entity. Stepped in `GROWTH_STEPS` increments: every change to a
+    /// tree's scale makes the physics engine rescale its collider and recompute its mass, so a
+    /// tree that grew a hair every frame would cost more than everything else in the sim.
     pub fn scale(self) -> f32 {
-        SAPLING_SCALE + (1.0 - SAPLING_SCALE) * self.0.clamp(0.0, 1.0)
+        let stepped = (self.0.clamp(0.0, 1.0) * GROWTH_STEPS).floor() / GROWTH_STEPS;
+        SAPLING_SCALE + (1.0 - SAPLING_SCALE) * stepped
     }
 }
 
@@ -99,6 +102,8 @@ pub const BASE_OFFSET: Vec3 = Vec3::new(0.0, -TREE_LENGTH / 2.0, 0.0);
 /// Growth: seconds from sapling to fully mature, and how big a fresh sapling is.
 const GROW_TIME: f32 = 90.0;
 const SAPLING_SCALE: f32 = 0.2;
+/// Number of distinct sizes a tree passes through while growing (see [`Maturity::scale`]).
+const GROWTH_STEPS: f32 = 100.0;
 /// Trees at or above this maturity drop seeds.
 const SEED_MATURITY: f32 = 0.9;
 /// Seconds between seeds from one tree (random per tree within this range).
@@ -147,16 +152,19 @@ fn load_tree_assets(
 /// Spawns a standing tree with its base at `base` on the ground.
 fn spawn_tree(commands: &mut Commands, assets: &TreeAssets, base: Vec2, maturity: Maturity) {
     let scale = maturity.scale();
+    let center = Vec3::new(base.x, scale * TREE_LENGTH / 2.0, base.y);
     // To use a real model, replace the children with `SceneRoot(asset_server.load("tree.glb#Scene0"))`.
     commands
         .spawn((
             Tree,
             maturity,
             Transform {
-                translation: Vec3::new(base.x, scale * TREE_LENGTH / 2.0, base.y),
+                translation: center,
                 scale: Vec3::splat(scale),
                 ..default()
             },
+            // Bodies start with their physics position set explicitly (see `physics.rs`).
+            Position(center),
             Visibility::default(),
             RigidBody::Static,
             Collider::capsule(TRUNK_RADIUS, TREE_LENGTH - 2.0 * TRUNK_RADIUS),
@@ -219,8 +227,11 @@ fn grow_trees(
         if maturity.0 < 1.0 {
             maturity.0 = (maturity.0 + time.delta_secs() / GROW_TIME).min(1.0);
             let scale = maturity.scale();
-            transform.scale = Vec3::splat(scale);
-            transform.translation.y = scale * TREE_LENGTH / 2.0;
+            // Only touch the transform when the stepped size actually changes.
+            if transform.scale.x != scale {
+                transform.scale = Vec3::splat(scale);
+                transform.translation.y = scale * TREE_LENGTH / 2.0;
+            }
         }
         if maturity.0 >= SEED_MATURITY && !has_timer {
             let interval = rng.0.random_range(SEED_INTERVAL);
@@ -357,6 +368,12 @@ mod tests {
         assert_eq!(Maturity(1.0).scale(), 1.0);
         let half = Maturity(0.5).scale();
         assert!(half > SAPLING_SCALE && half < 1.0);
+        // Growth is stepped: a sliver of maturity doesn't change the size.
+        assert_eq!(
+            Maturity(0.5).scale(),
+            Maturity(0.5 + 0.4 / GROWTH_STEPS).scale()
+        );
+        assert!(Maturity(0.5 + 1.0 / GROWTH_STEPS).scale() > half);
         // Out-of-range values clamp rather than extrapolate.
         assert_eq!(Maturity(-1.0).scale(), SAPLING_SCALE);
         assert_eq!(Maturity(3.0).scale(), 1.0);

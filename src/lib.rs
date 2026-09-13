@@ -4,12 +4,11 @@ use std::time::Duration;
 
 use bevy::app::{PluginsState, ScheduleRunnerPlugin};
 use bevy::ecs::schedule::{Schedules, SingleThreadedExecutor};
+use bevy::light::GlobalAmbientLight;
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::render::RenderPlugin;
-use bevy::render::settings::WgpuSettings;
 use bevy::time::TimeUpdateStrategy;
-use bevy::window::{ExitCondition, PresentMode};
-use bevy::winit::WinitPlugin;
+use bevy::window::PresentMode;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -22,6 +21,10 @@ pub mod map;
 pub mod physics;
 pub mod sim;
 pub mod trees;
+
+/// Physics rate for windowed runs: at 60 fps the default headless rate (20 Hz) would move bodies
+/// in visible 3-frame jumps, and transform interpolation is off (gameplay reads `Transform`).
+pub const WINDOWED_PHYSICS_HZ: f64 = 64.0;
 
 /// Seed for everything procedurally generated (tree placement, seeding, etc.).
 #[derive(Resource)]
@@ -45,7 +48,8 @@ pub struct RunConfig {
     /// Simulated seconds per frame in headless mode. Coarser steps run faster; gameplay systems
     /// see larger deltas, physics keeps its own rate.
     pub step: f32,
-    /// Physics steps per simulated second.
+    /// Physics steps per simulated second. The default is tuned for headless runs; windowed runs
+    /// use [`WINDOWED_PHYSICS_HZ`] so motion stays smooth without interpolation.
     pub physics_hz: f64,
     /// The map to play on.
     pub map: MapConfig,
@@ -60,7 +64,7 @@ impl Default for RunConfig {
             vsync: true,
             duration: None,
             step: 1.0 / 60.0,
-            physics_hz: 64.0,
+            physics_hz: 20.0,
             map: MapConfig::default(),
         }
     }
@@ -72,24 +76,20 @@ pub fn build_app(config: &RunConfig) -> App {
     let mut app = App::new();
 
     if config.headless {
+        // Only what the sim needs: no rendering, windowing, input or UI plugins. Their systems
+        // would run every frame doing nothing, and that per-frame cost is what bounds how fast
+        // a headless run can go. Spawners still attach meshes and materials, so the asset
+        // stores exist even though nothing draws them.
         app.add_plugins((
-            DefaultPlugins
-                .set(RenderPlugin {
-                    render_creation: WgpuSettings {
-                        backends: None,
-                        ..default()
-                    }
-                    .into(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<WinitPlugin>(),
-            ScheduleRunnerPlugin::run_loop(Duration::ZERO),
+            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)),
+            LogPlugin::default(),
+            TransformPlugin,
+            AssetPlugin::default(),
         ))
+        .init_asset::<Mesh>()
+        .init_asset::<Image>()
+        .init_asset::<StandardMaterial>()
+        .init_resource::<GlobalAmbientLight>()
         // Every frame advances the sim by exactly one step, however long it took in wall time.
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
             config.step,
@@ -121,10 +121,11 @@ pub fn build_app(config: &RunConfig) -> App {
             trees::TreesPlugin,
             characters::CharactersPlugin,
             history::HistoryPlugin,
-            camera::CameraPlugin,
         ));
 
-    if config.headless {
+    if !config.headless {
+        app.add_plugins(camera::CameraPlugin);
+    } else {
         // The sim's systems are tiny; the multithreaded executor's sync overhead roughly halves
         // headless throughput compared to running everything on one thread.
         let mut schedules = app.world_mut().resource_mut::<Schedules>();

@@ -10,6 +10,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use serde::Deserialize;
 
+use crate::RunConfig;
+
 /// The built-in map, compiled in so no file is needed at runtime.
 const DEFAULT_MAP: &str = include_str!("../assets/maps/default.ron");
 
@@ -108,14 +110,16 @@ impl Plugin for MapPlugin {
 fn spawn_map(
     mut commands: Commands,
     map: Res<MapConfig>,
+    config: Res<RunConfig>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    // Headless has no image loader (nothing would draw the texture anyway).
     let texture = match &map.texture {
-        Some(path) => asset_server.load(path.clone()),
-        None => images.add(checkerboard_image(512, 16)),
+        Some(path) if !config.headless => asset_server.load(path.clone()),
+        _ => images.add(checkerboard_image(512, 16)),
     };
 
     commands.spawn((
