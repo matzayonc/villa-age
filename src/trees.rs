@@ -72,8 +72,9 @@ pub struct TreesPlugin;
 impl Plugin for TreesPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (load_tree_assets, spawn_trees).chain())
+            // Everything that moves a body runs at the physics rate, on the physics components.
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     grow_trees,
                     disperse_seeds,
@@ -123,9 +124,9 @@ pub fn max_health(maturity: Maturity) -> f32 {
     TREE_HEALTH * maturity.scale()
 }
 
-/// Where the tree touches the ground, in world space.
-pub fn tree_base(transform: &Transform) -> Vec3 {
-    transform.translation + transform.rotation * (BASE_OFFSET * transform.scale.y)
+/// Where the tree touches the ground, in world space, from its physics pose.
+pub fn tree_base(position: &Position, rotation: &Rotation, maturity: Maturity) -> Vec3 {
+    position.0 + rotation.0 * (BASE_OFFSET * maturity.scale())
 }
 
 fn load_tree_assets(
@@ -163,8 +164,9 @@ fn spawn_tree(commands: &mut Commands, assets: &TreeAssets, base: Vec2, maturity
                 scale: Vec3::splat(scale),
                 ..default()
             },
-            // Bodies start with their physics position set explicitly (see `physics.rs`).
+            // Bodies start with their physics pose set explicitly (see `physics.rs`).
             Position(center),
+            Rotation::IDENTITY,
             Visibility::default(),
             RigidBody::Static,
             Collider::capsule(TRUNK_RADIUS, TREE_LENGTH - 2.0 * TRUNK_RADIUS),
@@ -216,21 +218,23 @@ fn grow_trees(
         Entity,
         &TreeState,
         &mut Maturity,
+        &mut Position,
         &mut Transform,
         Has<SeedTimer>,
     )>,
 ) {
-    for (entity, state, mut maturity, mut transform, has_timer) in &mut trees {
+    for (entity, state, mut maturity, mut position, mut transform, has_timer) in &mut trees {
         if !matches!(state, TreeState::Standing { .. }) {
             continue;
         }
         if maturity.0 < 1.0 {
             maturity.0 = (maturity.0 + time.delta_secs() / GROW_TIME).min(1.0);
             let scale = maturity.scale();
-            // Only touch the transform when the stepped size actually changes.
+            // Only touch the body when the stepped size actually changes. Scale isn't part of
+            // the physics pose, so it goes on the transform, which the collider follows.
             if transform.scale.x != scale {
                 transform.scale = Vec3::splat(scale);
-                transform.translation.y = scale * TREE_LENGTH / 2.0;
+                position.y = scale * TREE_LENGTH / 2.0;
             }
         }
         if maturity.0 >= SEED_MATURITY && !has_timer {
@@ -252,25 +256,25 @@ fn disperse_seeds(
     assets: Res<TreeAssets>,
     map: Res<MapConfig>,
     mut rng: ResMut<GameRng>,
-    mut parents: Query<(&Transform, &TreeState, &mut SeedTimer)>,
-    trees: Query<&Transform, With<Tree>>,
-    characters: Query<&Transform, With<crate::characters::Character>>,
+    mut parents: Query<(&Position, &Rotation, &Maturity, &TreeState, &mut SeedTimer)>,
+    trees: Query<(&Position, &Rotation, &Maturity), With<Tree>>,
+    characters: Query<&Position, With<crate::characters::Character>>,
 ) {
     let mut tree_count = trees.iter().len();
     let mut occupied: Vec<Vec2> = trees
         .iter()
-        .map(|t| tree_base(t).xz())
-        .chain(characters.iter().map(|t| t.translation.xz()))
+        .map(|(p, r, &m)| tree_base(p, r, m).xz())
+        .chain(characters.iter().map(|p| p.xz()))
         .collect();
 
-    for (transform, state, mut timer) in &mut parents {
+    for (position, rotation, &maturity, state, mut timer) in &mut parents {
         if !timer.0.tick(time.delta()).just_finished()
             || !matches!(state, TreeState::Standing { .. })
             || tree_count >= MAX_TREES
         {
             continue;
         }
-        let parent = tree_base(transform).xz();
+        let parent = tree_base(position, rotation, maturity).xz();
         let rng = &mut rng.0;
 
         for _ in 0..SEED_ATTEMPTS {
@@ -288,8 +292,11 @@ fn disperse_seeds(
 }
 
 /// Tips felled trees over around their base until they lie flat, then marks them `Fallen`.
-fn animate_falling_trees(time: Res<Time>, mut trees: Query<(&mut TreeState, &mut Transform)>) {
-    for (mut state, mut transform) in &mut trees {
+fn animate_falling_trees(
+    time: Res<Time>,
+    mut trees: Query<(&mut TreeState, &mut Position, &mut Rotation, &Maturity)>,
+) {
+    for (mut state, mut position, mut rotation, &maturity) in &mut trees {
         let TreeState::Falling {
             base,
             dir,
@@ -301,14 +308,13 @@ fn animate_falling_trees(time: Res<Time>, mut trees: Query<(&mut TreeState, &mut
         let progress = (progress + time.delta_secs() / FALL_DURATION).min(1.0);
         // Ease in: a tree starts tipping slowly and accelerates.
         let eased = progress * progress;
-        let scale = transform.scale.y;
+        let scale = maturity.scale();
 
         let axis = Vec3::Y.cross(dir).normalize();
-        let rotation = Quat::from_axis_angle(axis, eased * std::f32::consts::FRAC_PI_2);
+        let tilt = Quat::from_axis_angle(axis, eased * std::f32::consts::FRAC_PI_2);
         // Pivot around the base, lifting it by the trunk radius as it comes to rest on its side.
-        transform.rotation = rotation;
-        transform.translation =
-            base + Vec3::Y * (TRUNK_RADIUS * scale * eased) - rotation * (BASE_OFFSET * scale);
+        rotation.0 = tilt;
+        position.0 = base + Vec3::Y * (TRUNK_RADIUS * scale * eased) - tilt * (BASE_OFFSET * scale);
 
         *state = if progress >= 1.0 {
             TreeState::Fallen
@@ -347,6 +353,11 @@ fn sync_tree_bodies(
             LinearVelocity::ZERO,
             AngularVelocity::ZERO,
         ));
+        // A felled tree moves (the fall, then being dragged): smooth its transform between
+        // physics steps from here on. Standing trees never move, so they don't pay for it.
+        if matches!(state, TreeState::Falling { .. }) {
+            tree.insert(TransformInterpolation);
+        }
         if wanted_body == RigidBody::Dynamic {
             tree.insert((
                 PLANE_LOCK,
@@ -388,19 +399,17 @@ mod tests {
 
     #[test]
     fn tree_base_is_below_the_center_when_upright() {
-        let scale = 0.5;
-        let transform = Transform::from_xyz(3.0, scale * TREE_LENGTH / 2.0, -4.0)
-            .with_scale(Vec3::splat(scale));
-        let base = tree_base(&transform);
+        let maturity = Maturity(0.5);
+        let position = Position::from_xyz(3.0, maturity.scale() * TREE_LENGTH / 2.0, -4.0);
+        let base = tree_base(&position, &Rotation::IDENTITY, maturity);
         assert!(base.abs_diff_eq(Vec3::new(3.0, 0.0, -4.0), 1e-5), "{base}");
     }
 
     #[test]
     fn tree_base_follows_rotation_when_lying_down() {
         // Tipped 90° around Z: the base is now beside the center along +X.
-        let transform = Transform::from_xyz(0.0, 0.0, 0.0)
-            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
-        let base = tree_base(&transform);
+        let rotation = Rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        let base = tree_base(&Position::default(), &rotation, Maturity(1.0));
         assert!(
             base.abs_diff_eq(Vec3::new(TREE_LENGTH / 2.0, 0.0, 0.0), 1e-5),
             "{base}"

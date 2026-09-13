@@ -1,11 +1,12 @@
 //! Headless end-to-end runs of the simulation.
 
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
 use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
 use villa_age::history::{Action, ActionLog, Entry};
-use villa_age::trees::{MAX_TREES, TRUNK_RADIUS, Tree, TreeState, tree_base};
+use villa_age::trees::{MAX_TREES, Maturity, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
 /// Builds a headless app on the default map and steps it for `sim_seconds` of simulated time.
@@ -21,7 +22,7 @@ fn run_headless(seed: u64, sim_seconds: f32) -> App {
 
 /// Advances a headless app by `sim_seconds` of simulated time.
 fn step(app: &mut App, sim_seconds: f32) {
-    let step = app.world().resource::<RunConfig>().step;
+    let step = app.world().resource::<RunConfig>().step as f32;
     let frames = (sim_seconds / step).ceil() as u32;
     for _ in 0..frames {
         app.update();
@@ -47,15 +48,15 @@ fn count_state(app: &mut App, pred: impl Fn(&TreeState) -> bool) -> usize {
 fn snapshot(app: &mut App) -> Vec<[f32; 3]> {
     let world = app.world_mut();
     let mut points: Vec<[f32; 3]> = world
-        .query_filtered::<&Transform, With<Tree>>()
+        .query_filtered::<(&Position, &Rotation, &Maturity), With<Tree>>()
         .iter(world)
-        .map(|t| tree_base(t).to_array())
+        .map(|(p, r, &m)| tree_base(p, r, m).to_array())
         .collect();
     points.extend(
         world
-            .query_filtered::<&Transform, With<Character>>()
+            .query_filtered::<&Position, With<Character>>()
             .iter(world)
-            .map(|t| t.translation.to_array()),
+            .map(|p| p.to_array()),
     );
     points.sort_by(|a, b| a.partial_cmp(b).unwrap());
     points
@@ -139,17 +140,17 @@ fn custom_map_spawns_what_it_lists() {
     assert_eq!(tree_count(&mut app), 3);
     let world = app.world_mut();
     let mut characters: Vec<[f32; 2]> = world
-        .query_filtered::<&Transform, With<Character>>()
+        .query_filtered::<&Position, With<Character>>()
         .iter(world)
-        .map(|t| t.translation.xz().to_array())
+        .map(|p| p.xz().to_array())
         .collect();
     characters.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(characters, [[-3.0, -4.0], [1.0, 2.0]]);
 
     let mut trees: Vec<[f32; 2]> = world
-        .query_filtered::<&Transform, With<Tree>>()
+        .query_filtered::<(&Position, &Rotation, &Maturity), With<Tree>>()
         .iter(world)
-        .map(|t| tree_base(t).xz().to_array())
+        .map(|(p, r, &m)| tree_base(p, r, m).xz().to_array())
         .collect();
     trees.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(trees, [[-6.0, 7.0], [5.0, 5.0], [8.0, -8.0]]);
@@ -209,12 +210,12 @@ fn character_runs_through_the_gathering_cycle() {
     );
 
     // The log ends up delivered, lying near home.
-    let (state, transform) = world
-        .query::<(&TreeState, &Transform)>()
+    let (state, position, rotation, &maturity) = world
+        .query::<(&TreeState, &Position, &Rotation, &Maturity)>()
         .single(world)
         .unwrap();
     assert!(matches!(state, TreeState::Delivered));
-    let base = tree_base(transform);
+    let base = tree_base(position, rotation, maturity);
     assert!(base.xz().length() < 3.0, "log left at {base}");
 }
 
@@ -240,25 +241,26 @@ fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
     // Turn the sapling at x = 4 (too young to be a target) into a full-size log lying along Z
     // across the character's path, or move it out of the way entirely.
     let world = app.world_mut();
-    let (mut state, mut transform) = world
-        .query_filtered::<(&mut TreeState, &mut Transform), With<Tree>>()
+    let (mut state, mut position, mut rotation, _) = world
+        .query_filtered::<(&mut TreeState, &mut Position, &mut Rotation, &Maturity), With<Tree>>()
         .iter_mut(world)
-        .find(|(_, t)| tree_base(t).x < 6.0)
+        .find(|(_, p, r, m)| tree_base(p, r, **m).x < 6.0)
         .unwrap();
     if with_log {
         *state = TreeState::Delivered;
-        *transform = Transform::from_xyz(4.0, TRUNK_RADIUS, 0.0)
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+        *position = Position::from_xyz(4.0, TRUNK_RADIUS, 0.0);
+        *rotation = Rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
     } else {
-        *transform = Transform::from_xyz(-8.0, transform.translation.y, -8.0);
+        *position = Position::from_xyz(-8.0, position.y, -8.0);
     }
 
+    let step_secs = app.world().resource::<RunConfig>().step as f32;
     let mut max_y = f32::MIN;
-    for _ in 0..(10.0 * 60.0) as u32 {
+    for _ in 0..(10.0 / step_secs) as u32 {
         app.update();
         let world = app.world_mut();
-        let (transform, children, log) = world
-            .query_filtered::<(&Transform, &Children, &ActionLog), With<Character>>()
+        let (position, children, log) = world
+            .query_filtered::<(&Position, &Children, &ActionLog), With<Character>>()
             .single(world)
             .unwrap();
         let entries: Vec<Entry> = log.iter().copied().collect();
@@ -267,7 +269,7 @@ fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
             return (entries[1].at - entries[0].at, max_y);
         }
         // The visual is a child of the body; it's what rises over a log.
-        let body_y = transform.translation.y;
+        let body_y = position.y;
         let lift = children
             .iter()
             .filter_map(|child| world.get::<Transform>(child))
@@ -313,7 +315,7 @@ fn nobody_gets_stuck() {
         seed: 1,
         ..RunConfig::default()
     });
-    let step = app.world().resource::<RunConfig>().step;
+    let step = app.world().resource::<RunConfig>().step as f32;
     // Where each character was last seen moving (or doing something stationary), and when.
     let mut last_moved: HashMap<Entity, (Vec2, f32)> = HashMap::new();
 
@@ -321,12 +323,16 @@ fn nobody_gets_stuck() {
         app.update();
         let now = frame as f32 * step;
         let world = app.world_mut();
-        for (entity, transform, log) in world
-            .query_filtered::<(Entity, &Transform, &ActionLog), With<Character>>()
+        for (entity, position, log) in world
+            .query_filtered::<(Entity, &Position, &ActionLog), With<Character>>()
             .iter(world)
         {
-            let pos = transform.translation.xz();
-            let action = log.current().unwrap().action;
+            let pos = position.xz();
+            // Gameplay runs with the physics step; the very first frame has none yet.
+            let Some(entry) = log.current() else {
+                continue;
+            };
+            let action = entry.action;
             let should_move = matches!(action, Action::WalkTo { .. } | Action::Haul { .. });
             let seen = last_moved.entry(entity).or_insert((pos, now));
             if !should_move || pos.distance(seen.0) > 0.05 {
@@ -461,7 +467,7 @@ fn heavy_world_keeps_stepping() {
     app.update();
     let first_frame = first_frame_start.elapsed();
 
-    let step_secs = app.world().resource::<RunConfig>().step;
+    let step_secs = app.world().resource::<RunConfig>().step as f32;
     let frames = (SIM_SECONDS / step_secs).ceil() as u32;
     let run_start = Instant::now();
     for _ in 0..frames {

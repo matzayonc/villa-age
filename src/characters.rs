@@ -120,12 +120,16 @@ pub struct CharactersPlugin;
 
 impl Plugin for CharactersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_characters).add_systems(
-            Update,
-            (climb_logs, gather, haul)
-                .chain()
-                .in_set(SimSet::Characters),
-        );
+        app.add_systems(Startup, spawn_characters)
+            // Everything that moves a body runs at the physics rate, on the physics components.
+            .add_systems(
+                FixedUpdate,
+                (climb_logs, gather, haul, face_heading)
+                    .chain()
+                    .in_set(SimSet::Characters),
+            )
+            // Visuals run per frame.
+            .add_systems(Update, animate_character_meshes.in_set(SimSet::Characters));
     }
 }
 
@@ -153,8 +157,11 @@ fn spawn_characters(
                 strength,
                 speed,
                 Transform::from_translation(position),
-                // Bodies start with their physics position set explicitly (see `physics.rs`).
+                // Bodies start with their physics pose set explicitly (see `physics.rs`).
                 Position(position),
+                Rotation::IDENTITY,
+                // The body moves at the physics rate; the transform is smoothed between steps.
+                TransformInterpolation,
                 Visibility::default(),
                 RigidBody::Dynamic,
                 Collider::capsule(RADIUS, HEIGHT),
@@ -176,12 +183,13 @@ fn spawn_characters(
     }
 }
 
-/// The physics-facing parts of a character that walking needs.
+/// The physics-facing parts of a character that walking needs. Gameplay reads and writes the
+/// physics pose (`Position`/`Rotation`); the `Transform` is render-only and follows it.
 #[derive(bevy::ecs::query::QueryData)]
 #[query_data(mutable)]
 struct Walker {
     entity: Entity,
-    transform: &'static mut Transform,
+    position: &'static Position,
     collider: &'static Collider,
     velocity: &'static mut LinearVelocity,
     heading: &'static mut Heading,
@@ -200,9 +208,7 @@ impl WalkerItem<'_, '_> {
     /// except `ignore`; logs aren't steered around but climbed over, slowly. Aims to stop at
     /// `stop_at` from the target and returns whether it has arrived, which allows `ARRIVE_SLACK`
     /// beyond `stop_at` so the physics step landing a hair short can't leave it creeping forever.
-    ///
-    /// `dt` is this frame's delta (turning happens per frame); `physics_step` is how long the
-    /// velocity will be applied for, which sets how fast the last stretch can be taken.
+    /// `dt` is the physics step: how long the velocity set here is applied for.
     fn walk_toward(
         &mut self,
         spatial: &SpatialQuery,
@@ -210,9 +216,8 @@ impl WalkerItem<'_, '_> {
         stop_at: f32,
         ignore: Option<Entity>,
         dt: f32,
-        physics_step: f32,
     ) -> bool {
-        let to_target = target - self.transform.translation.xz();
+        let to_target = target - self.position.xz();
         let distance = to_target.length();
         if distance <= stop_at + ARRIVE_SLACK {
             self.velocity.0 = Vec3::ZERO;
@@ -225,7 +230,7 @@ impl WalkerItem<'_, '_> {
         if self.climbing.0 {
             max_speed *= CLIMB_SPEED_FACTOR;
         }
-        let speed = max_speed.min((distance - stop_at) / physics_step);
+        let speed = max_speed.min((distance - stop_at) / dt);
         self.velocity.0 = steered * speed;
         self.turn_toward(steered, dt);
         false
@@ -241,7 +246,7 @@ impl WalkerItem<'_, '_> {
             .with_excluded_entities([self.entity].into_iter().chain(ignore));
         let Some(hit) = spatial.cast_shape(
             self.collider,
-            self.transform.translation,
+            self.position.0,
             Quat::IDENTITY,
             direction,
             &ShapeCastConfig::from_max_distance(LOOKAHEAD),
@@ -270,13 +275,19 @@ struct TreeInfo<'a> {
     maturity: Maturity,
 }
 
-impl<'a> From<(Entity, &Transform, &'a TreeState, &Maturity)> for TreeInfo<'a> {
-    fn from(
-        (entity, transform, state, &maturity): (Entity, &Transform, &'a TreeState, &Maturity),
-    ) -> Self {
+type TreeQueryItem<'a> = (
+    Entity,
+    &'a Position,
+    &'a Rotation,
+    &'a TreeState,
+    &'a Maturity,
+);
+
+impl<'a> From<TreeQueryItem<'a>> for TreeInfo<'a> {
+    fn from((entity, position, rotation, state, &maturity): TreeQueryItem<'a>) -> Self {
         Self {
             entity,
-            base: tree_base(transform).xz(),
+            base: tree_base(position, rotation, maturity).xz(),
             state,
             maturity,
         }
@@ -306,17 +317,16 @@ fn choose_tree<'a>(
         .map(|(_, tree)| tree)
 }
 
-/// Notes which characters are standing on a log and lifts their visuals onto it.
+/// Notes which characters are standing on a log.
 fn climb_logs(
     spatial: SpatialQuery,
-    mut characters: Query<(&Transform, &Collider, &mut Climbing, &Children), With<Character>>,
-    mut meshes: Query<&mut Transform, (With<CharacterMesh>, Without<Character>)>,
+    mut characters: Query<(&Position, &Collider, &mut Climbing), With<Character>>,
 ) {
-    for (transform, collider, mut climbing, children) in &mut characters {
+    for (position, collider, mut climbing) in &mut characters {
         let on_log = !spatial
             .shape_intersections(
                 collider,
-                transform.translation,
+                position.0,
                 Quat::IDENTITY,
                 &SpatialQueryFilter::from_mask(Layer::Log),
             )
@@ -324,10 +334,31 @@ fn climb_logs(
         if climbing.0 != on_log {
             climbing.0 = on_log;
         }
-        let lift = if on_log { CLIMB_HEIGHT } else { 0.0 };
+    }
+}
+
+/// Per-frame visuals on the character's mesh (never on the body, whose pose is physics'): it
+/// rises onto a log while climbing and swings in a chopping motion while chopping.
+fn animate_character_meshes(
+    time: Res<Time>,
+    characters: Query<(&Climbing, &ActionLog, &Children), With<Character>>,
+    mut meshes: Query<&mut Transform, (With<CharacterMesh>, Without<Character>)>,
+) {
+    let swing = (time.elapsed_secs() * SWING_SPEED).sin().max(0.0) * SWING_ANGLE;
+    for (climbing, log, children) in &characters {
+        let lift = if climbing.0 { CLIMB_HEIGHT } else { 0.0 };
+        let chopping = log
+            .current()
+            .is_some_and(|entry| matches!(entry.action, Action::Chop { .. }));
+        let rotation = if chopping {
+            Quat::from_rotation_x(-swing)
+        } else {
+            Quat::IDENTITY
+        };
         for &child in children {
             if let Ok(mut mesh) = meshes.get_mut(child) {
                 mesh.translation.y = lift;
+                mesh.rotation = rotation;
             }
         }
     }
@@ -337,9 +368,8 @@ fn climb_logs(
 fn gather(
     mut commands: Commands,
     time: Res<Time>,
-    physics_time: Res<Time<Fixed>>,
     spatial: SpatialQuery,
-    mut trees: Query<(Entity, &Transform, &mut TreeState, &Maturity), Without<Character>>,
+    mut trees: Query<(Entity, &Position, &Rotation, &mut TreeState, &Maturity), Without<Character>>,
     mut characters: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Character>>,
 ) {
     let now = time.elapsed_secs();
@@ -347,10 +377,8 @@ fn gather(
         let Task::Gather { target: current } = &mut *task else {
             continue;
         };
-        let pos = walker.transform.translation.xz();
+        let pos = walker.position.xz();
         let dt = time.delta_secs();
-        // Chop swing angle applied on top of the heading this frame.
-        let mut swing = 0.0;
 
         // Stick with the current target while it's still usable; only scan the whole forest
         // when there is none or someone else got to it first.
@@ -365,19 +393,14 @@ fn gather(
             log.record(now, Action::Idle);
             continue;
         };
-        let Ok((_, tree_transform, mut state, &maturity)) = trees.get_mut(tree) else {
+        let Ok((_, tree_position, tree_rotation, mut state, &maturity)) = trees.get_mut(tree)
+        else {
             continue;
         };
-        let target = tree_base(tree_transform).xz();
+        let log_base = tree_base(tree_position, tree_rotation, maturity);
+        let target = log_base.xz();
 
-        let arrived = walker.walk_toward(
-            &spatial,
-            target,
-            ARRIVE_DISTANCE,
-            Some(tree),
-            dt,
-            physics_time.delta_secs(),
-        );
+        let arrived = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
         if !arrived {
             log.record(now, Action::WalkTo { tree });
         } else {
@@ -399,8 +422,6 @@ fn gather(
                     } else {
                         *state = TreeState::Standing { damage };
                         log.record(now, Action::Chop { tree });
-                        // Lean toward the tree in a swinging motion while chopping.
-                        swing = (time.elapsed_secs() * SWING_SPEED).sin().max(0.0) * SWING_ANGLE;
                     }
                 }
                 // Wait for it to hit the ground.
@@ -410,8 +431,7 @@ fn gather(
                     log.record(now, Action::Haul { tree });
                     // A slack rope from the character (held at log height) to the log's base: the
                     // log is only pulled once the rope is taut, so grabbing doesn't move it.
-                    let log_base = tree_base(tree_transform);
-                    let hand = Vec3::Y * (log_base.y - walker.transform.translation.y);
+                    let hand = Vec3::Y * (log_base.y - walker.position.y);
                     let slack = ROPE_LENGTH.max(target.distance(pos));
                     let mut joint = DistanceJoint::new(walker.entity, tree)
                         .with_local_anchor1(hand)
@@ -425,8 +445,15 @@ fn gather(
                 }
             }
         }
+    }
+}
 
-        walker.transform.rotation = walker.heading.0 * Quat::from_rotation_x(-swing);
+/// Points the body the way the character is heading. Rotation is locked in physics, so this is
+/// the only thing that turns it. (Kept out of the walking systems: their spatial queries read
+/// every body's rotation, which can't be borrowed mutably at the same time.)
+fn face_heading(mut characters: Query<(&Heading, &mut Rotation), Changed<Heading>>) {
+    for (heading, mut rotation) in &mut characters {
+        rotation.0 = heading.0;
     }
 }
 
@@ -434,7 +461,6 @@ fn gather(
 fn haul(
     mut commands: Commands,
     time: Res<Time>,
-    physics_time: Res<Time<Fixed>>,
     spatial: SpatialQuery,
     mut trees: Query<&mut TreeState, Without<Character>>,
     mut characters: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Character>>,
@@ -461,9 +487,7 @@ fn haul(
             DROP_DISTANCE,
             Some(tree),
             time.delta_secs(),
-            physics_time.delta_secs(),
         );
-        walker.transform.rotation = walker.heading.0;
 
         if arrived {
             // Let go: the log freezes exactly where it was dragged to.

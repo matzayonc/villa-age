@@ -22,9 +22,9 @@ pub mod physics;
 pub mod sim;
 pub mod trees;
 
-/// Physics rate for windowed runs: at 60 fps the default headless rate (20 Hz) would move bodies
-/// in visible 3-frame jumps, and transform interpolation is off (gameplay reads `Transform`).
-pub const WINDOWED_PHYSICS_HZ: f64 = 64.0;
+/// Default physics rate. Contacts here are simple push-outs plus a slack rope, and the gameplay
+/// tolerates 50 ms decisions; lower means faster headless runs.
+const PHYSICS_HZ: f64 = 20.0;
 
 /// Seed for everything procedurally generated (tree placement, seeding, etc.).
 #[derive(Resource)]
@@ -45,11 +45,13 @@ pub struct RunConfig {
     pub vsync: bool,
     /// Stop after this many simulated seconds.
     pub duration: Option<f32>,
-    /// Simulated seconds per frame in headless mode. Coarser steps run faster; gameplay systems
-    /// see larger deltas, physics keeps its own rate.
-    pub step: f32,
-    /// Physics steps per simulated second. The default is tuned for headless runs; windowed runs
-    /// use [`WINDOWED_PHYSICS_HZ`] so motion stays smooth without interpolation.
+    /// Simulated seconds per frame in headless mode. Gameplay runs at the physics rate, so a
+    /// frame is only overhead: one physics step per frame (`1 / physics_hz`) is the fastest
+    /// setting that changes nothing; finer steps only add per-frame work.
+    pub step: f64,
+    /// Physics (and gameplay) steps per simulated second. The same in every mode, so a seed
+    /// reproduces the same run windowed and headless; windowed motion between steps is smoothed
+    /// by transform interpolation.
     pub physics_hz: f64,
     /// The map to play on.
     pub map: MapConfig,
@@ -63,8 +65,8 @@ impl Default for RunConfig {
             speed: 1.0,
             vsync: true,
             duration: None,
-            step: 1.0 / 60.0,
-            physics_hz: 20.0,
+            step: 1.0 / PHYSICS_HZ,
+            physics_hz: PHYSICS_HZ,
             map: MapConfig::default(),
         }
     }
@@ -91,7 +93,7 @@ pub fn build_app(config: &RunConfig) -> App {
         .init_asset::<StandardMaterial>()
         .init_resource::<GlobalAmbientLight>()
         // Every frame advances the sim by exactly one step, however long it took in wall time.
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             config.step,
         )));
     } else {

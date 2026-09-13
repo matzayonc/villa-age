@@ -33,19 +33,22 @@ pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
-        app.configure_sets(
-            Update,
+        // Gameplay that moves bodies runs in `FixedUpdate` (at the physics rate, on the physics
+        // pose); frame-rate things (visuals, UI, camera) in `Update`. Same order in both.
+        let order = || {
             (
                 SimSet::Trees,
                 SimSet::Characters,
                 SimSet::History,
                 SimSet::Camera,
             )
-                .chain(),
-        )
-        .init_resource::<Stats>()
-        .add_systems(Startup, apply_initial_speed)
-        .add_systems(Update, (report_stats, exit_when_done));
+                .chain()
+        };
+        app.configure_sets(FixedUpdate, order())
+            .configure_sets(Update, order())
+            .init_resource::<Stats>()
+            .add_systems(Startup, apply_initial_speed)
+            .add_systems(Update, (report_stats, exit_when_done));
 
         // Keyboard control needs the input plugin, which headless runs don't have.
         if !is_headless(app) {
@@ -67,7 +70,7 @@ fn apply_initial_speed(
     mut time: ResMut<Time<Virtual>>,
 ) {
     let speed = config.speed.max(f32::EPSILON);
-    apply_speed(&mut time, speed, config.step);
+    apply_speed(&mut time, speed, config.step as f32);
     commands.insert_resource(FastForward {
         speed,
         paused: false,
@@ -111,7 +114,7 @@ fn fast_forward_keys(
         }
     }
     if changed {
-        apply_speed(&mut time, ff.speed, config.step);
+        apply_speed(&mut time, ff.speed, config.step as f32);
     }
 }
 
