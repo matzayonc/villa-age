@@ -1,6 +1,7 @@
 //! Placeholder 3D villagers: they chop the nearest tree, drag the log back home, repeat.
 
 use avian3d::prelude::*;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use rand::RngExt;
 
@@ -13,13 +14,23 @@ use crate::sim::SimSet;
 
 /// Marker for villager entities.
 #[derive(Component)]
-#[require(Task, Heading, ActionLog, Strength, Speed, Climbing)]
+#[require(Task, Heading, ActionLog, Strength, Speed, Climbing, Whiskers)]
 pub struct Villager;
 
-/// Whether the villager is on top of a log (its capsule overlaps one). Refreshed every frame
-/// by [`climb_logs`].
+/// Whether the villager is on top of a log (its capsule overlaps one). Refreshed by
+/// [`climb_logs`] every step the villager moves.
 #[derive(Component, Default, Clone, Copy, Debug, PartialEq)]
 pub struct Climbing(pub bool);
+
+/// What the villager's lookahead rays last saw (see [`WalkerItem::steer`]): the clearance to
+/// the nearest obstacle and its surface normal, if any. Refreshed every [`WHISKER_INTERVAL`]
+/// steps of walking rather than every step; between refreshes the last result is reused.
+#[derive(Component, Default)]
+pub struct Whiskers {
+    hit: Option<(f32, Vec3)>,
+    /// Steps of walking until the next refresh.
+    steps_left: u8,
+}
 
 /// How hard a villager chops: a multiplier on the base chop rate, rolled at spawn.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -54,15 +65,22 @@ pub struct Home(pub Vec3);
 pub enum Task {
     /// Walk to `target`, chop it if standing, pick it up if fallen. The target is chosen (the
     /// nearest usable tree) when there is none and kept until it stops being usable, so the
-    /// choice isn't recomputed over every tree each frame.
-    Gather { target: Option<Entity> },
+    /// choice isn't recomputed over every tree each frame. When no tree is usable at all, the
+    /// forest isn't scanned again before `retry_at` (physics seconds).
+    Gather {
+        target: Option<Entity>,
+        retry_at: f32,
+    },
     /// Drag `tree` back home; `rope` is the joint entity holding it.
     Haul { tree: Entity, rope: Entity },
 }
 
 impl Default for Task {
     fn default() -> Self {
-        Self::Gather { target: None }
+        Self::Gather {
+            target: None,
+            retry_at: 0.0,
+        }
     }
 }
 
@@ -89,9 +107,14 @@ const ROPE_LENGTH: f32 = ARRIVE_DISTANCE;
 const HARVEST_MATURITY: f32 = 0.6;
 /// Walking speed multiplier while climbing over a log.
 const CLIMB_SPEED_FACTOR: f32 = 0.35;
-/// Steering: how far ahead to look for obstacles, and how hard to swerve around them.
+/// Steering: how far ahead of the body to look for obstacles, and how hard to swerve around them.
 const LOOKAHEAD: f32 = 2.5;
 const AVOID_STRENGTH: f32 = 1.5;
+/// How long an idle villager waits before looking for a usable tree again.
+const IDLE_RETRY: f32 = 1.0;
+/// Walking steps between refreshes of the lookahead rays: 0.15 s at the default physics rate,
+/// under half a meter of walking against a `LOOKAHEAD` of 2.5 m.
+const WHISKER_INTERVAL: u8 = 3;
 
 /// The body capsule.
 pub const RADIUS: f32 = 0.4;
@@ -143,6 +166,15 @@ fn spawn_villagers(mut commands: Commands, map: Res<MapConfig>, mut rng: ResMut<
     }
 }
 
+/// What a walking villager can sense around it: spatial queries for looking ahead, and the
+/// contacts the physics step already resolved for what it's touching right now.
+#[derive(SystemParam)]
+struct Surroundings<'w, 's> {
+    spatial: SpatialQuery<'w, 's>,
+    collisions: Collisions<'w>,
+    layers: Query<'w, 's, &'static CollisionLayers>,
+}
+
 /// The physics-facing parts of a villager that walking needs. Gameplay reads and writes the
 /// physics pose (`Position`/`Rotation`); the `Transform` is render-only and follows it.
 #[derive(bevy::ecs::query::QueryData)]
@@ -155,6 +187,7 @@ struct Walker {
     heading: &'static mut Heading,
     speed: &'static Speed,
     climbing: &'static Climbing,
+    whiskers: &'static mut Whiskers,
 }
 
 impl WalkerItem<'_, '_> {
@@ -171,7 +204,7 @@ impl WalkerItem<'_, '_> {
     /// `dt` is the physics step: how long the velocity set here is applied for.
     fn walk_toward(
         &mut self,
-        spatial: &SpatialQuery,
+        surroundings: &Surroundings,
         target: Vec2,
         stop_at: f32,
         ignore: Option<Entity>,
@@ -185,7 +218,7 @@ impl WalkerItem<'_, '_> {
         }
         let dir = to_target / distance;
         let desired = Vec3::new(dir.x, 0.0, dir.y);
-        let steered = self.steer(spatial, desired, ignore);
+        let steered = self.steer(surroundings, desired, ignore);
         let mut max_speed = MOVE_SPEED * self.speed.0;
         if self.climbing.0 {
             max_speed *= CLIMB_SPEED_FACTOR;
@@ -196,33 +229,97 @@ impl WalkerItem<'_, '_> {
         false
     }
 
-    /// Local obstacle avoidance: casts this villager's shape along `desired` and, if something is
-    /// in the way, blends in a sideways push along the obstacle's surface.
-    fn steer(&self, spatial: &SpatialQuery, desired: Vec3, ignore: Option<Entity>) -> Vec3 {
+    /// Local obstacle avoidance: finds the nearest obstacle in the way along `desired` and blends
+    /// in a sideways push along its surface, harder the closer it is.
+    ///
+    /// Two sources, both cheap. Anything the body is already touching comes from the contacts
+    /// the physics step resolved (the one it's pushing against counts as being right in front).
+    /// Anything ahead comes from three rays ("whiskers") along `desired`, from the body's centre
+    /// and either side of it, cast every [`WHISKER_INTERVAL`] steps and remembered in between.
+    /// Rays can't replace the contacts (a thin sapling fits between them) and contacts can't
+    /// replace the rays (no warning before impact). A sweep of the capsule did both, but ran GJK
+    /// per candidate and a full EPA per obstacle already touching, which in a crowd was most of
+    /// the sim's time.
+    fn steer(
+        &mut self,
+        surroundings: &Surroundings,
+        desired: Vec3,
+        ignore: Option<Entity>,
+    ) -> Vec3 {
         let Ok(direction) = Dir3::new(desired) else {
             return desired;
         };
-        let filter = SpatialQueryFilter::from_mask(steer_mask())
-            .with_excluded_entities([self.entity].into_iter().chain(ignore));
-        let Some(hit) = spatial.cast_shape(
-            self.collider,
-            self.position.0,
-            Quat::IDENTITY,
-            direction,
-            &ShapeCastConfig::from_max_distance(LOOKAHEAD),
-            &filter,
-        ) else {
-            return desired;
+        let steer_mask = steer_mask();
+
+        // Touching: the contact whose surface faces most squarely against `desired`, if any
+        // does at all. Normals point from the first collider to the second; we want the
+        // obstacle's, pointing at us.
+        let touching = surroundings
+            .collisions
+            .collisions_with(self.entity)
+            .filter(|pair| {
+                let other = if pair.collider1 == self.entity {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                };
+                Some(other) != ignore
+                    && surroundings
+                        .layers
+                        .get(other)
+                        .is_ok_and(|layers| (steer_mask & layers.memberships) != LayerMask::NONE)
+            })
+            .flat_map(|pair| {
+                let sign = if pair.collider1 == self.entity {
+                    -1.0
+                } else {
+                    1.0
+                };
+                pair.manifolds
+                    .iter()
+                    .map(move |manifold| manifold.normal * sign)
+            })
+            .filter(|normal| normal.dot(desired) < 0.0)
+            .min_by(|a, b| a.dot(desired).total_cmp(&b.dot(desired)))
+            .map(|normal| (0.0, normal));
+
+        // Ahead, only when nothing is in contact (that takes precedence anyway): the rays start
+        // at the centre, so `RADIUS` is taken off what they measure.
+        let ahead = |whiskers: &mut Whiskers| {
+            if whiskers.steps_left == 0 {
+                let filter = SpatialQueryFilter::from_mask(steer_mask)
+                    .with_excluded_entities([self.entity].into_iter().chain(ignore));
+                let side = direction.cross(Vec3::Y) * RADIUS;
+                whiskers.hit = [-1.0, 0.0, 1.0]
+                    .into_iter()
+                    .filter_map(|offset| {
+                        surroundings.spatial.cast_ray(
+                            self.position.0 + side * offset,
+                            direction,
+                            LOOKAHEAD + RADIUS,
+                            true,
+                            &filter,
+                        )
+                    })
+                    .min_by(|a, b| a.distance.total_cmp(&b.distance))
+                    .map(|hit| ((hit.distance - RADIUS).max(0.0), hit.normal));
+                whiskers.steps_left = WHISKER_INTERVAL;
+            }
+            whiskers.steps_left -= 1;
+            whiskers.hit
         };
 
-        let normal = Vec3::new(hit.normal1.x, 0.0, hit.normal1.z).normalize_or_zero();
+        let Some((clearance, normal)) = touching.or_else(|| ahead(&mut self.whiskers)) else {
+            return desired;
+        };
+        let normal = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
         let mut tangent = desired - normal * desired.dot(normal);
         if tangent.length_squared() < 1e-4 {
             // Head-on: pick a side.
             tangent = normal.cross(Vec3::Y);
         }
-        let closeness = 1.0 - (hit.distance / LOOKAHEAD).clamp(0.0, 1.0);
-        (desired + tangent.normalize() * (AVOID_STRENGTH * closeness)).normalize_or(desired)
+        let closeness = 1.0 - (clearance / LOOKAHEAD).clamp(0.0, 1.0);
+        (desired + tangent.normalize_or_zero() * (AVOID_STRENGTH * closeness)).normalize_or(desired)
     }
 }
 
@@ -277,12 +374,16 @@ fn choose_tree<'a>(
         .map(|(_, tree)| tree)
 }
 
-/// Notes which villagers are standing on a log.
+/// Notes which villagers are standing on a log. A villager that isn't moving can't have got
+/// on or off one, so only walkers are checked.
 fn climb_logs(
     spatial: SpatialQuery,
-    mut villagers: Query<(&Position, &Collider, &mut Climbing), With<Villager>>,
+    mut villagers: Query<(&Position, &Collider, &LinearVelocity, &mut Climbing), With<Villager>>,
 ) {
-    for (position, collider, mut climbing) in &mut villagers {
+    for (position, collider, velocity, mut climbing) in &mut villagers {
+        if velocity.0 == Vec3::ZERO {
+            continue;
+        }
         let on_log = !spatial
             .shape_intersections(
                 collider,
@@ -301,25 +402,37 @@ fn climb_logs(
 fn gather(
     mut commands: Commands,
     time: Res<Time>,
-    spatial: SpatialQuery,
+    surroundings: Surroundings,
     mut trees: Query<(Entity, &Position, &Rotation, &mut TreeState, &Maturity), Without<Villager>>,
     mut villagers: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Villager>>,
 ) {
     let now = time.elapsed_secs();
     for (mut walker, strength, mut task, mut log) in &mut villagers {
-        let Task::Gather { target: current } = &mut *task else {
+        let Task::Gather {
+            target: current,
+            retry_at,
+        } = &mut *task
+        else {
             continue;
         };
         let pos = walker.position.xz();
         let dt = time.delta_secs();
 
         // Stick with the current target while it's still usable; only scan the whole forest
-        // when there is none or someone else got to it first.
+        // when there is none or someone else got to it first, and not more than once per
+        // `IDLE_RETRY` while it keeps coming up empty.
         let still_usable = current
             .and_then(|tree| trees.get(tree).ok())
             .is_some_and(|tree| tree_priority(pos, &TreeInfo::from(tree)).is_some());
         if !still_usable {
-            *current = choose_tree(pos, trees.iter().map(TreeInfo::from)).map(|tree| tree.entity);
+            *current = None;
+            if now >= *retry_at {
+                *current =
+                    choose_tree(pos, trees.iter().map(TreeInfo::from)).map(|tree| tree.entity);
+                if current.is_none() {
+                    *retry_at = now + IDLE_RETRY;
+                }
+            }
         }
         let Some(tree) = *current else {
             walker.velocity.0 = Vec3::ZERO;
@@ -333,7 +446,7 @@ fn gather(
         let log_base = tree_base(tree_position, tree_rotation, maturity);
         let target = log_base.xz();
 
-        let arrived = walker.walk_toward(&spatial, target, ARRIVE_DISTANCE, Some(tree), dt);
+        let arrived = walker.walk_toward(&surroundings, target, ARRIVE_DISTANCE, Some(tree), dt);
         if !arrived {
             log.record(now, Action::WalkTo { tree });
         } else {
@@ -394,7 +507,7 @@ fn face_heading(mut villagers: Query<(&Heading, &mut Rotation), Changed<Heading>
 fn haul(
     mut commands: Commands,
     time: Res<Time>,
-    spatial: SpatialQuery,
+    surroundings: Surroundings,
     mut trees: Query<&mut TreeState, Without<Villager>>,
     mut villagers: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Villager>>,
 ) {
@@ -415,7 +528,7 @@ fn haul(
         }
 
         let arrived = walker.walk_toward(
-            &spatial,
+            &surroundings,
             home.0.xz(),
             DROP_DISTANCE,
             Some(tree),

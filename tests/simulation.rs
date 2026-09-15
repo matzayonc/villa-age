@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use villa_age::entities::carrots::{Carrot, MAX_CARROTS};
-use villa_age::entities::rabbits::{Appetite, Breeding, MAX_RABBITS, Rabbit};
+use villa_age::entities::rabbits::{Appetite, Rabbit};
 use villa_age::entities::trees::{MAX_TREES, Maturity, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::entities::villagers::{Climbing, STAT_RANGE, Speed, Strength, Villager};
 use villa_age::history::{Action, ActionLog, Entry};
@@ -98,7 +98,8 @@ fn forest_regrows_within_cap() {
         trees > initial,
         "expected new saplings beyond the initial {initial}, got {trees}"
     );
-    assert!(trees <= MAX_TREES, "tree cap exceeded: {trees}");
+    let cap = app.world().resource::<MapConfig>().scale_count(MAX_TREES);
+    assert!(trees <= cap, "tree cap exceeded: {trees} > {cap}");
 }
 
 #[test]
@@ -445,11 +446,9 @@ fn rabbits_hop_about_and_stay_on_the_map() {
             if velocity.0 == Vec3::ZERO {
                 resting_steps += 1;
             }
-            // Kits born along the way haven't had the whole minute to cover ground.
-            if let Some((distance, last)) = travelled.get_mut(&entity) {
-                *distance += last.distance(position.xz());
-                *last = position.xz();
-            }
+            let (distance, last) = travelled.get_mut(&entity).unwrap();
+            *distance += last.distance(position.xz());
+            *last = position.xz();
         }
     }
     // Hops are short bursts: most of the time is spent sitting.
@@ -466,52 +465,6 @@ fn rabbits_hop_about_and_stay_on_the_map() {
     }
 }
 
-/// Ready rabbits find each other and have kits, which grow up; the population is capped.
-#[test]
-fn rabbits_breed_up_to_the_cap() {
-    let map = MapConfig::from_ron(
-        "(size: 20.0, villagers: [], trees: [], rabbits: [(-3.0, 0.0), (3.0, 0.0), (0.0, 3.0), (0.0, -3.0)])",
-    )
-    .unwrap();
-    let initial = map.rabbits.len();
-    let mut app = build_app(&RunConfig {
-        headless: true,
-        seed: 4,
-        map,
-        ..RunConfig::default()
-    });
-    step(&mut app, 120.0);
-
-    let world = app.world_mut();
-    let rabbits: Vec<(&Rabbit, &Breeding)> =
-        world.query::<(&Rabbit, &Breeding)>().iter(world).collect();
-    let kits = rabbits
-        .iter()
-        .filter(|(_, b)| matches!(b, Breeding::Growing { .. }))
-        .count();
-    assert!(
-        rabbits.len() > initial,
-        "expected kits beyond the initial {initial}, got {}",
-        rabbits.len()
-    );
-    assert!(kits > 0, "no kit still growing after 2 minutes");
-    for (rabbit, breeding) in &rabbits {
-        let grown = !matches!(breeding, Breeding::Growing { .. });
-        assert!(
-            grown == (rabbit.size >= 1.0),
-            "size {} doesn't match growth state",
-            rabbit.size
-        );
-    }
-
-    // Left running, the warren fills up but never goes past the cap.
-    step(&mut app, 600.0);
-    let world = app.world_mut();
-    let count = world.query::<&Rabbit>().iter(world).count();
-    assert!(count > initial * 2, "warren stayed small: {count}");
-    assert!(count <= MAX_RABBITS, "rabbit cap exceeded: {count}");
-}
-
 fn carrot_count(app: &mut App) -> usize {
     app.world_mut()
         .query_filtered::<(), With<Carrot>>()
@@ -522,7 +475,7 @@ fn carrot_count(app: &mut App) -> usize {
 /// Carrots sprout at random spots over time, clear of the edge, and never past the cap.
 #[test]
 fn carrots_sprout_within_cap() {
-    let map = MapConfig::from_ron("(size: 20.0, villagers: [], trees: [])").unwrap();
+    let map = MapConfig::from_ron("(size: 40.0, villagers: [], trees: [])").unwrap();
     let mut app = build_app(&RunConfig {
         headless: true,
         seed: 5,
@@ -546,7 +499,7 @@ fn carrots_sprout_within_cap() {
     );
     for spot in &spots {
         assert!(
-            spot.abs().max_element() < 10.0,
+            spot.abs().max_element() < 20.0,
             "carrot off the map at {spot}"
         );
     }
@@ -559,8 +512,9 @@ fn carrots_sprout_within_cap() {
 
     step(&mut app, 600.0);
     let count = carrot_count(&mut app);
+    let cap = app.world().resource::<MapConfig>().scale_count(MAX_CARROTS);
     assert_eq!(
-        count, MAX_CARROTS,
+        count, cap,
         "with nobody eating, carrots should fill up to the cap"
     );
 }
@@ -582,7 +536,7 @@ fn rabbits_eat_carrots() {
     let mut sprouted = 0;
     let mut eaten = 0;
     let mut last = 0;
-    for _ in 0..(300.0 / step_secs) as u32 {
+    for _ in 0..(600.0 / step_secs) as u32 {
         app.update();
         let count = carrot_count(&mut app);
         if count > last {
@@ -592,10 +546,10 @@ fn rabbits_eat_carrots() {
         }
         last = count;
     }
-    assert!(sprouted > eaten, "sprouted {sprouted}");
+    assert!(sprouted >= 2, "only {sprouted} carrots sprouted");
     assert!(
         eaten >= 2,
-        "rabbits ate only {eaten} of {sprouted} carrots in 5 minutes"
+        "rabbits ate only {eaten} of {sprouted} carrots in 10 minutes"
     );
 
     // A rabbit that has eaten is full for a while.

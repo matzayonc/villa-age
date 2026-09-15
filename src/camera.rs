@@ -26,7 +26,8 @@ const ZOOM_LINE_STEP: f32 = 0.1;
 const ZOOM_PIXEL_STEP: f32 = 0.005;
 
 const MIN_DISTANCE: f32 = 4.0;
-const MAX_DISTANCE: f32 = 80.0;
+/// Farthest the camera zooms out, as a multiple of the map's side.
+const MAX_DISTANCE_PER_SIZE: f32 = 2.0;
 /// Pitch limits keep the camera above the map and away from the straight-down gimbal lock.
 const MIN_PITCH: f32 = 0.15;
 const MAX_PITCH: f32 = 1.5;
@@ -72,7 +73,12 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-fn zoom(scroll: Res<AccumulatedMouseScroll>, ui: UiHover, mut camera: Single<&mut OrbitCamera>) {
+fn zoom(
+    scroll: Res<AccumulatedMouseScroll>,
+    ui: UiHover,
+    map: Res<MapConfig>,
+    mut camera: Single<&mut OrbitCamera>,
+) {
     if scroll.delta.y == 0.0 || ui.over_ui() {
         return;
     }
@@ -81,7 +87,8 @@ fn zoom(scroll: Res<AccumulatedMouseScroll>, ui: UiHover, mut camera: Single<&mu
         MouseScrollUnit::Pixel => ZOOM_PIXEL_STEP,
     };
     let factor = (1.0 - scroll.delta.y * step).clamp(0.5, 2.0);
-    camera.distance = (camera.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
+    let max_distance = map.size * MAX_DISTANCE_PER_SIZE;
+    camera.distance = (camera.distance * factor).clamp(MIN_DISTANCE, max_distance);
 }
 
 fn orbit(

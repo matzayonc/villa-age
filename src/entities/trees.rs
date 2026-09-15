@@ -106,6 +106,7 @@ const SEED_DISTANCE: std::ops::RangeInclusive<f32> = 2.5..=6.0;
 const TREE_SPACING: f32 = 2.0;
 /// Random spots tried per seed before giving up.
 const SEED_ATTEMPTS: usize = 6;
+/// The map won't hold more trees than this, per [`crate::map::TUNING_AREA`] (scaled by area).
 pub const MAX_TREES: usize = 150;
 /// Trees can't be placed closer than this to the map edge.
 const EDGE_MARGIN: f32 = 2.0;
@@ -209,6 +210,7 @@ fn disperse_seeds(
     villagers: Query<&Position, With<crate::entities::villagers::Villager>>,
 ) {
     let mut tree_count = trees.iter().len();
+    let max_trees = map.scale_count(MAX_TREES);
     let mut occupied: Vec<Vec2> = trees
         .iter()
         .map(|(p, r, &m)| tree_base(p, r, m).xz())
@@ -218,7 +220,7 @@ fn disperse_seeds(
     for (position, rotation, &maturity, state, mut timer) in &mut parents {
         if !timer.0.tick(time.delta()).just_finished()
             || !matches!(state, TreeState::Standing { .. })
-            || tree_count >= MAX_TREES
+            || tree_count >= max_trees
         {
             continue;
         }

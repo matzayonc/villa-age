@@ -1,16 +1,21 @@
 //! The map's layout: a square of ground and what initially stands on it, from a RON file (see
-//! `assets/maps/default.ron`). Drawing the ground is `visuals::ground`'s job.
+//! `assets/maps/default.ron`, made by the `genmap` binary). Drawing the ground is
+//! `visuals::ground`'s job.
 
 use std::path::Path;
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The built-in map, compiled in so no file is needed at runtime.
 const DEFAULT_MAP: &str = include_str!("../assets/maps/default.ron");
 
+/// Area of the 40×40 map the gameplay numbers were tuned on. Population caps and spawn rates are
+/// given for a map this big and scaled by area for others (see [`MapConfig::scale_count`]).
+pub const TUNING_AREA: f32 = 40.0 * 40.0;
+
 /// Everything a map file defines: the ground and what initially stands on it.
-#[derive(Resource, Deserialize, Clone, Debug)]
+#[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 pub struct MapConfig {
     /// Side length of the square map in world units, centered on the origin.
     pub size: f32,
@@ -26,7 +31,7 @@ pub struct MapConfig {
     pub rabbits: Vec<(f32, f32)>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TreeSpec {
     /// Base of the tree (x, z).
     pub pos: (f32, f32),
@@ -52,6 +57,18 @@ impl MapConfig {
     /// Distance from the center to an edge.
     pub fn half_extent(&self) -> f32 {
         self.size / 2.0
+    }
+
+    /// Scales a count or rate given per [`TUNING_AREA`] to this map's area, never below 1.
+    pub fn scale_count(&self, per_tuning_area: usize) -> usize {
+        let scaled = per_tuning_area as f32 * self.size * self.size / TUNING_AREA;
+        (scaled.round() as usize).max(1)
+    }
+
+    /// Scales a time between events given per [`TUNING_AREA`] to this map's area: a bigger map
+    /// has proportionally more of them, so they come sooner.
+    pub fn scale_interval(&self, per_tuning_area: f32) -> f32 {
+        per_tuning_area * TUNING_AREA / (self.size * self.size)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -108,11 +125,28 @@ mod tests {
     #[test]
     fn default_map_is_valid_and_populated() {
         let map = MapConfig::default();
-        assert_eq!(map.size, 40.0);
-        assert_eq!(map.half_extent(), 20.0);
+        assert_eq!(map.size, 400.0);
+        assert_eq!(map.half_extent(), 200.0);
         assert!(map.texture.is_none());
-        assert_eq!(map.villagers.len(), 5);
-        assert!(map.trees.len() >= 20, "{} trees", map.trees.len());
+        assert!(
+            map.villagers.len() >= 100,
+            "{} villagers",
+            map.villagers.len()
+        );
+        assert!(map.trees.len() >= 1000, "{} trees", map.trees.len());
+        assert!(map.rabbits.len() >= 100, "{} rabbits", map.rabbits.len());
+    }
+
+    #[test]
+    fn counts_and_intervals_scale_with_area() {
+        let tuning = map("villagers: [], trees: []").unwrap();
+        // A 20×20 map is a quarter of the tuning area.
+        assert_eq!(tuning.scale_count(40), 10);
+        assert_eq!(tuning.scale_count(1), 1);
+        assert_eq!(tuning.scale_interval(10.0), 40.0);
+        let big = MapConfig::from_ron("(size: 400.0, villagers: [], trees: [])").unwrap();
+        assert_eq!(big.scale_count(150), 15_000);
+        assert_eq!(big.scale_interval(10.0), 0.1);
     }
 
     #[test]

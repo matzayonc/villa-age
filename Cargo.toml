@@ -2,6 +2,7 @@
 name = "villa-age"
 version = "0.1.0"
 edition = "2024"
+default-run = "villa-age"
 
 [dependencies]
 # Default features already include 2d, 3d, mouse/keyboard input and x11.
@@ -28,3 +29,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release speed with debug info, so `perf` can unwind and name frames (see scripts/flamegraph.sh).
+[profile.profiling]
+inherits = "release"
+debug = true

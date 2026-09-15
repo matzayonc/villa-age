@@ -1,12 +1,12 @@
 //! Rabbit visuals: a capsule body with two ears. The meshes are children of the physics body so
 //! they can arc through the air over a hop while the body (locked to the ground plane) stays
-//! put, and they scale with how grown the rabbit is.
+//! put.
 
 use bevy::prelude::*;
 
 use crate::entities::rabbits::{self, HOP_DURATION, Hopping, Rabbit};
 
-/// A piece of the rabbit's visual. Holds the piece's height when a full-grown rabbit is sitting.
+/// A piece of the rabbit's visual. Holds the piece's height when the rabbit is sitting.
 #[derive(Component)]
 struct RabbitMesh {
     rest_y: f32,
@@ -75,18 +75,17 @@ fn attach_rabbit_meshes(add: On<Add, Rabbit>, mut commands: Commands, assets: Re
         });
 }
 
-/// Per-frame: the mesh rises and falls in an arc over a hop, and is scaled to how grown the
-/// rabbit is.
+/// Per-frame: the mesh rises and falls in an arc over a hop.
 fn animate_rabbit_meshes(
     time: Res<Time<Fixed>>,
-    rabbits: Query<(&Rabbit, &Hopping, &Children)>,
+    rabbits: Query<(&Hopping, &Children), With<Rabbit>>,
     mut meshes: Query<(&mut Transform, &RabbitMesh)>,
 ) {
     // Where the fixed clock is between steps, so the arc is smooth at any frame rate.
     let now = time.elapsed_secs() + time.overstep().as_secs_f32();
-    for (rabbit, hopping, children) in &rabbits {
+    for (hopping, children) in &rabbits {
         let lift = match *hopping {
-            Hopping::Hop { started } => {
+            Hopping::Hop { started, .. } => {
                 let progress = ((now - started) / HOP_DURATION).clamp(0.0, 1.0);
                 (progress * std::f32::consts::PI).sin() * HOP_HEIGHT
             }
@@ -94,8 +93,7 @@ fn animate_rabbit_meshes(
         };
         for &child in children {
             if let Ok((mut transform, mesh)) = meshes.get_mut(child) {
-                transform.scale = Vec3::splat(rabbit.size);
-                transform.translation.y = mesh.rest_y * rabbit.size + lift;
+                transform.translation.y = mesh.rest_y + lift;
             }
         }
     }

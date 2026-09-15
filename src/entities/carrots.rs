@@ -19,9 +19,10 @@ pub struct Carrot;
 #[derive(Resource)]
 struct NextCarrot(f32);
 
-/// Seconds between carrots sprouting, rolled per carrot.
+/// Seconds between carrots sprouting, rolled per carrot, per [`crate::map::TUNING_AREA`]: a
+/// bigger map sprouts proportionally more often.
 const SPROUT_INTERVAL: std::ops::RangeInclusive<f32> = 6.0..=14.0;
-/// The map won't hold more carrots than this.
+/// The map won't hold more carrots than this, per [`crate::map::TUNING_AREA`] (scaled by area).
 pub const MAX_CARROTS: usize = 30;
 /// Random spots tried per carrot before giving up until the next interval.
 const SPROUT_ATTEMPTS: usize = 6;
@@ -38,8 +39,9 @@ impl Plugin for CarrotsPlugin {
     }
 }
 
-fn schedule_first_carrot(mut commands: Commands, mut rng: ResMut<GameRng>) {
-    commands.insert_resource(NextCarrot(rng.0.random_range(SPROUT_INTERVAL)));
+fn schedule_first_carrot(mut commands: Commands, map: Res<MapConfig>, mut rng: ResMut<GameRng>) {
+    let interval = map.scale_interval(rng.0.random_range(SPROUT_INTERVAL));
+    commands.insert_resource(NextCarrot(interval));
 }
 
 fn spawn_carrot(commands: &mut Commands, spot: Vec2) {
@@ -74,9 +76,9 @@ fn sprout_carrots(
         return;
     }
     let rng = &mut rng.0;
-    next.0 = now + rng.random_range(SPROUT_INTERVAL);
+    next.0 = now + map.scale_interval(rng.random_range(SPROUT_INTERVAL));
     let count = carrots.iter().len();
-    if count >= MAX_CARROTS {
+    if count >= map.scale_count(MAX_CARROTS) {
         return;
     }
 
