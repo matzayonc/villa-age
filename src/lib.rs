@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bevy::app::{PluginsState, ScheduleRunnerPlugin};
 use bevy::ecs::schedule::{Schedules, SingleThreadedExecutor};
-use bevy::light::GlobalAmbientLight;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -15,13 +14,12 @@ use rand_chacha::ChaCha8Rng;
 pub use map::MapConfig;
 
 pub mod camera;
-pub mod characters;
+pub mod entities;
 pub mod history;
 pub mod map;
 pub mod physics;
-pub mod rabbits;
 pub mod sim;
-pub mod trees;
+pub mod visuals;
 
 /// Default physics rate. Contacts here are simple push-outs plus a slack rope, and the gameplay
 /// tolerates 50 ms decisions; lower means faster headless runs.
@@ -81,18 +79,12 @@ pub fn build_app(config: &RunConfig) -> App {
     if config.headless {
         // Only what the sim needs: no rendering, windowing, input or UI plugins. Their systems
         // would run every frame doing nothing, and that per-frame cost is what bounds how fast
-        // a headless run can go. Spawners still attach meshes and materials, so the asset
-        // stores exist even though nothing draws them.
+        // a headless run can go. Nothing gets a mesh either (see `visuals`).
         app.add_plugins((
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)),
             LogPlugin::default(),
             TransformPlugin,
-            AssetPlugin::default(),
         ))
-        .init_asset::<Mesh>()
-        .init_asset::<Image>()
-        .init_asset::<StandardMaterial>()
-        .init_resource::<GlobalAmbientLight>()
         // Every frame advances the sim by exactly one step, however long it took in wall time.
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             config.step,
@@ -120,15 +112,15 @@ pub fn build_app(config: &RunConfig) -> App {
         .add_plugins((
             sim::SimPlugin,
             physics::GamePhysicsPlugin,
-            map::MapPlugin,
-            trees::TreesPlugin,
-            characters::CharactersPlugin,
-            rabbits::RabbitsPlugin,
+            entities::trees::TreesPlugin,
+            entities::carrots::CarrotsPlugin,
+            entities::villagers::VillagersPlugin,
+            entities::rabbits::RabbitsPlugin,
             history::HistoryPlugin,
         ));
 
     if !config.headless {
-        app.add_plugins(camera::CameraPlugin);
+        app.add_plugins((visuals::VisualsPlugin, camera::CameraPlugin));
     } else {
         // The sim's systems are tiny; the multithreaded executor's sync overhead roughly halves
         // headless throughput compared to running everything on one thread.

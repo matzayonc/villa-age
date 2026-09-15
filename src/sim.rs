@@ -6,14 +6,16 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::RunConfig;
-use crate::rabbits::Rabbit;
-use crate::trees::{Tree, TreeState};
+use crate::entities::carrots::Carrot;
+use crate::entities::rabbits::Rabbit;
+use crate::entities::trees::{Tree, TreeState};
 
 /// Order of the gameplay systems within `Update`. Fixed so a seed reproduces a run.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Trees,
-    Characters,
+    Carrots,
+    Villagers,
     Critters,
     History,
     Camera,
@@ -53,7 +55,8 @@ impl Plugin for SimPlugin {
         let order = || {
             (
                 SimSet::Trees,
-                SimSet::Characters,
+                SimSet::Carrots,
+                SimSet::Villagers,
                 SimSet::Critters,
                 SimSet::History,
                 SimSet::Camera,
@@ -181,6 +184,7 @@ fn report_stats(
     mut stats: ResMut<Stats>,
     trees: Query<&TreeState, With<Tree>>,
     rabbits: Query<(), With<Rabbit>>,
+    carrots: Query<(), With<Carrot>>,
     bodies: Query<(), With<RigidBody>>,
 ) {
     let sim = time.elapsed_secs();
@@ -203,10 +207,11 @@ fn report_stats(
     }
     let wall = stats.started.elapsed().as_secs_f32();
     info!(
-        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | {fps:.0} fps | trees {} (standing {standing}, delivered {delivered}) | rabbits {} | bodies {}",
+        "sim {sim:.0}s | wall {wall:.1}s | {:.1}x | {fps:.0} fps | trees {} (standing {standing}, delivered {delivered}) | rabbits {} | carrots {} | bodies {}",
         sim / wall.max(1e-3),
         trees.iter().len(),
         rabbits.iter().len(),
+        carrots.iter().len(),
         bodies.iter().len(),
     );
 }

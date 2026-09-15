@@ -1,5 +1,5 @@
-//! Per-character timed action history, and windows that show it: a tooltip follows the cursor
-//! while a character is hovered; clicking a character opens a pinned window for it (any number
+//! Per-villager timed action history, and windows that show it: a tooltip follows the cursor
+//! while a villager is hovered; clicking a villager opens a pinned window for it (any number
 //! can be open at once), draggable by its title bar and closed with its `×`.
 
 use std::collections::VecDeque;
@@ -11,11 +11,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::camera::{UiHover, cursor_ray};
-use crate::characters::{Speed, Strength};
+use crate::entities::villagers::{Speed, Strength};
 use crate::physics::Layer;
 use crate::sim::{SimSet, is_headless};
 
-/// What a character is doing. Each variant names the tree involved, if any.
+/// What a villager is doing. Each variant names the tree involved, if any.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     /// No usable tree left.
@@ -53,11 +53,11 @@ pub struct Entry {
     pub action: Action,
 }
 
-/// Entries kept per character; the oldest are dropped past this.
+/// Entries kept per villager; the oldest are dropped past this.
 const HISTORY_CAPACITY: usize = 64;
 /// Entries shown in the history window.
 const WINDOW_LINES: usize = 10;
-/// How far from the camera a character can still be picked.
+/// How far from the camera a villager can still be picked.
 const PICK_DISTANCE: f32 = 200.0;
 /// Pixels between the cursor and the window's top-left corner while it follows the cursor.
 const TOOLTIP_OFFSET: Vec2 = Vec2::new(16.0, 16.0);
@@ -73,7 +73,7 @@ const CLOSE_COLOR: Color = Color::srgb_u8(179, 179, 179);
 const CLOSE_HOVER_COLOR: Color = Color::srgba_u8(255, 255, 255, 38);
 const CLOSE_PRESSED_COLOR: Color = Color::srgba_u8(255, 92, 92, 102);
 
-/// Bounded, timestamped log of a character's actions, oldest first. Preallocated: recording never
+/// Bounded, timestamped log of a villager's actions, oldest first. Preallocated: recording never
 /// allocates after spawn.
 #[derive(Component)]
 pub struct ActionLog {
@@ -135,7 +135,7 @@ impl Plugin for HistoryPlugin {
             .add_systems(
                 Update,
                 (
-                    (hover_character, open_window, render_windows).chain(),
+                    (hover_villager, open_window, render_windows).chain(),
                     style_close_button,
                 )
                     .in_set(SimSet::History),
@@ -143,11 +143,11 @@ impl Plugin for HistoryPlugin {
     }
 }
 
-/// A window showing `character`'s history. Pinned windows are spawned per click; the one with
-/// [`Tooltip`] follows the cursor and switches character with the hover.
+/// A window showing `villager`'s history. Pinned windows are spawned per click; the one with
+/// [`Tooltip`] follows the cursor and switches villager with the hover.
 #[derive(Component)]
 struct HistoryWindow {
-    character: Option<Entity>,
+    villager: Option<Entity>,
     /// Text entities inside the window.
     title: Entity,
     body: Entity,
@@ -194,10 +194,10 @@ fn spawn_tooltip(mut commands: Commands) {
 }
 
 /// Spawns a hidden history window at `corner` (top-left, in pixels). It gets a close button
-/// only when pinned to a character.
+/// only when pinned to a villager.
 fn spawn_window(
     commands: &mut Commands,
-    character: Option<Entity>,
+    villager: Option<Entity>,
     corner: Vec2,
     z: GlobalZIndex,
 ) -> Entity {
@@ -247,7 +247,7 @@ fn spawn_window(
         },
     );
     let title_bar = title_bar.id();
-    if character.is_some() {
+    if villager.is_some() {
         let close_button = commands
             .spawn((
                 CloseButton,
@@ -277,7 +277,7 @@ fn spawn_window(
         .entity(window)
         .insert((
             HistoryWindow {
-                character,
+                villager,
                 title,
                 body,
             },
@@ -329,28 +329,28 @@ fn style_close_button(mut buttons: Query<(&Interaction, &mut BackgroundColor), W
     }
 }
 
-/// Points the tooltip at the character under the cursor, if any.
-fn hover_character(
+/// Points the tooltip at the villager under the cursor, if any.
+fn hover_villager(
     ui: UiHover,
     spatial: SpatialQuery,
     cursor: Cursor,
-    characters: Query<(), With<ActionLog>>,
+    villagers: Query<(), With<ActionLog>>,
     mut tooltip: Single<&mut HistoryWindow, With<Tooltip>>,
 ) {
     // Nothing is hovered while the cursor is on the UI.
-    tooltip.character = cursor.ray().filter(|_| !ui.over_ui()).and_then(|ray| {
+    tooltip.villager = cursor.ray().filter(|_| !ui.over_ui()).and_then(|ray| {
         let hit = spatial.cast_ray(
             ray.origin,
             ray.direction,
             PICK_DISTANCE,
             true,
-            &SpatialQueryFilter::from_mask(Layer::Character),
+            &SpatialQueryFilter::from_mask(Layer::Villager),
         )?;
-        characters.contains(hit.entity).then_some(hit.entity)
+        villagers.contains(hit.entity).then_some(hit.entity)
     });
 }
 
-/// Clicking a hovered character opens a pinned window for it, or raises the one it already has.
+/// Clicking a hovered villager opens a pinned window for it, or raises the one it already has.
 /// Escape closes every pinned window.
 fn open_window(
     mut commands: Commands,
@@ -367,15 +367,15 @@ fn open_window(
         }
     }
 
-    let Some(character) = tooltip
-        .character
+    let Some(villager) = tooltip
+        .villager
         .filter(|_| buttons.just_pressed(MouseButton::Left))
     else {
         return;
     };
     let existing = pinned
         .iter()
-        .find(|(_, window)| window.character == Some(character))
+        .find(|(_, window)| window.villager == Some(villager))
         .map(|(entity, _)| entity);
     match existing {
         Some(window) => {
@@ -384,13 +384,13 @@ fn open_window(
         None => {
             // Opens where the tooltip is, so it looks like the tooltip stuck in place.
             let corner = cursor.position().unwrap_or_default() + TOOLTIP_OFFSET;
-            spawn_window(&mut commands, Some(character), corner, stack.raise());
+            spawn_window(&mut commands, Some(villager), corner, stack.raise());
         }
     }
 }
 
-/// Fills every window with its character's history. The tooltip follows the cursor and hides
-/// when nothing is hovered; a pinned window closes when its character is gone.
+/// Fills every window with its villager's history. The tooltip follows the cursor and hides
+/// when nothing is hovered; a pinned window closes when its villager is gone.
 fn render_windows(
     mut commands: Commands,
     time: Res<Time>,
@@ -407,9 +407,9 @@ fn render_windows(
 ) {
     let now = time.elapsed_secs();
     for (entity, window, mut node, mut visibility, is_tooltip) in &mut windows {
-        let Some((character, (log, name, strength, speed))) = window
-            .character
-            .and_then(|character| Some((character, logs.get(character).ok()?)))
+        let Some((villager, (log, name, strength, speed))) = window
+            .villager
+            .and_then(|villager| Some((villager, logs.get(villager).ok()?)))
         else {
             if is_tooltip {
                 *visibility = Visibility::Hidden;
@@ -430,7 +430,7 @@ fn render_windows(
             match name {
                 Some(name) => title.0.push_str(name),
                 None => {
-                    let _ = write!(title.0, "{character}");
+                    let _ = write!(title.0, "{villager}");
                 }
             }
             let _ = write!(title.0, "   str {:.2}  spd {:.2}", strength.0, speed.0);

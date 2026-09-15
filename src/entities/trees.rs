@@ -26,11 +26,11 @@ pub enum TreeState {
         dir: Vec3,
         progress: f32,
     },
-    /// Lying on the ground, free for a character to drag away. Characters climb over it.
+    /// Lying on the ground, free for a villager to drag away. Villagers climb over it.
     Fallen,
-    /// Being dragged by this character.
+    /// Being dragged by this villager.
     Carried(Entity),
-    /// Dropped off at a character's home; no longer interacted with. Characters climb over it.
+    /// Dropped off at a villager's home; no longer interacted with. Villagers climb over it.
     Delivered,
 }
 
@@ -58,20 +58,11 @@ impl Maturity {
 #[derive(Component)]
 struct SeedTimer(Timer);
 
-/// Shared meshes and materials for spawning trees.
-#[derive(Resource)]
-struct TreeAssets {
-    trunk_mesh: Handle<Mesh>,
-    canopy_mesh: Handle<Mesh>,
-    trunk_material: Handle<StandardMaterial>,
-    canopy_material: Handle<StandardMaterial>,
-}
-
 pub struct TreesPlugin;
 
 impl Plugin for TreesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (load_tree_assets, spawn_trees).chain())
+        app.add_systems(Startup, spawn_trees)
             // Everything that moves a body runs at the physics rate, on the physics components.
             .add_systems(
                 FixedUpdate,
@@ -87,14 +78,14 @@ impl Plugin for TreesPlugin {
     }
 }
 
-/// Chopping work (in seconds of one character chopping) to fell a fully grown tree.
+/// Chopping work (in seconds of one villager chopping) to fell a fully grown tree.
 const TREE_HEALTH: f32 = 4.0;
 /// Seconds it takes a felled tree to hit the ground.
 const FALL_DURATION: f32 = 1.2;
 pub const TRUNK_RADIUS: f32 = 0.25;
-const TRUNK_HEIGHT: f32 = 1.2;
-const CANOPY_RADIUS: f32 = 1.1;
-const CANOPY_HEIGHT: f32 = 2.4;
+pub const TRUNK_HEIGHT: f32 = 1.2;
+pub const CANOPY_RADIUS: f32 = 1.1;
+pub const CANOPY_HEIGHT: f32 = 2.4;
 /// Base-to-tip length of a fully grown tree.
 pub const TREE_LENGTH: f32 = TRUNK_HEIGHT + CANOPY_HEIGHT;
 /// Offset from the tree's origin (its center) to its base, in unscaled local space.
@@ -111,7 +102,7 @@ const SEED_MATURITY: f32 = 0.9;
 const SEED_INTERVAL: std::ops::RangeInclusive<f32> = 25.0..=45.0;
 /// Distance from the parent at which a seed can land.
 const SEED_DISTANCE: std::ops::RangeInclusive<f32> = 2.5..=6.0;
-/// Minimum distance between a new sapling and any tree base or character.
+/// Minimum distance between a new sapling and any tree base or villager.
 const TREE_SPACING: f32 = 2.0;
 /// Random spots tried per seed before giving up.
 const SEED_ATTEMPTS: usize = 6;
@@ -129,63 +120,26 @@ pub fn tree_base(position: &Position, rotation: &Rotation, maturity: Maturity) -
     position.0 + rotation.0 * (BASE_OFFSET * maturity.scale())
 }
 
-fn load_tree_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.insert_resource(TreeAssets {
-        trunk_mesh: meshes.add(Cylinder::new(TRUNK_RADIUS, TRUNK_HEIGHT)),
-        canopy_mesh: meshes.add(Cone::new(CANOPY_RADIUS, CANOPY_HEIGHT)),
-        trunk_material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.45, 0.3, 0.15),
-            perceptual_roughness: 1.0,
-            ..default()
-        }),
-        canopy_material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.15, 0.5, 0.2),
-            perceptual_roughness: 0.9,
-            ..default()
-        }),
-    });
-}
-
-/// Spawns a standing tree with its base at `base` on the ground.
-fn spawn_tree(commands: &mut Commands, assets: &TreeAssets, base: Vec2, maturity: Maturity) {
+/// Spawns a standing tree with its base at `base` on the ground. The transform's scale is part
+/// of gameplay: the collider follows it.
+fn spawn_tree(commands: &mut Commands, base: Vec2, maturity: Maturity) {
     let scale = maturity.scale();
     let center = Vec3::new(base.x, scale * TREE_LENGTH / 2.0, base.y);
-    // To use a real model, replace the children with `SceneRoot(asset_server.load("tree.glb#Scene0"))`.
-    commands
-        .spawn((
-            Tree,
-            maturity,
-            Transform {
-                translation: center,
-                scale: Vec3::splat(scale),
-                ..default()
-            },
-            // Bodies start with their physics pose set explicitly (see `physics.rs`).
-            Position(center),
-            Rotation::IDENTITY,
-            Visibility::default(),
-            RigidBody::Static,
-            Collider::capsule(TRUNK_RADIUS, TREE_LENGTH - 2.0 * TRUNK_RADIUS),
-            obstacle_layers(),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Mesh3d(assets.trunk_mesh.clone()),
-                MeshMaterial3d(assets.trunk_material.clone()),
-                Transform::from_translation(BASE_OFFSET + Vec3::Y * (TRUNK_HEIGHT / 2.0)),
-            ));
-            parent.spawn((
-                Mesh3d(assets.canopy_mesh.clone()),
-                MeshMaterial3d(assets.canopy_material.clone()),
-                Transform::from_translation(
-                    BASE_OFFSET + Vec3::Y * (TRUNK_HEIGHT + CANOPY_HEIGHT / 2.0),
-                ),
-            ));
-        });
+    commands.spawn((
+        Tree,
+        maturity,
+        Transform {
+            translation: center,
+            scale: Vec3::splat(scale),
+            ..default()
+        },
+        // Bodies start with their physics pose set explicitly (see `physics.rs`).
+        Position(center),
+        Rotation::IDENTITY,
+        RigidBody::Static,
+        Collider::capsule(TRUNK_RADIUS, TREE_LENGTH - 2.0 * TRUNK_RADIUS),
+        obstacle_layers(),
+    ));
 }
 
 /// Whether a sapling can go at `spot`: on the map and clear of every point in `occupied`.
@@ -198,14 +152,9 @@ fn spot_is_free(map: &MapConfig, spot: Vec2, occupied: impl IntoIterator<Item = 
 }
 
 /// Spawns the trees the map lists.
-fn spawn_trees(mut commands: Commands, assets: Res<TreeAssets>, map: Res<MapConfig>) {
+fn spawn_trees(mut commands: Commands, map: Res<MapConfig>) {
     for tree in &map.trees {
-        spawn_tree(
-            &mut commands,
-            &assets,
-            Vec2::from(tree.pos),
-            Maturity(tree.maturity),
-        );
+        spawn_tree(&mut commands, Vec2::from(tree.pos), Maturity(tree.maturity));
     }
 }
 
@@ -253,18 +202,17 @@ fn grow_trees(
 fn disperse_seeds(
     mut commands: Commands,
     time: Res<Time>,
-    assets: Res<TreeAssets>,
     map: Res<MapConfig>,
     mut rng: ResMut<GameRng>,
     mut parents: Query<(&Position, &Rotation, &Maturity, &TreeState, &mut SeedTimer)>,
     trees: Query<(&Position, &Rotation, &Maturity), With<Tree>>,
-    characters: Query<&Position, With<crate::characters::Character>>,
+    villagers: Query<&Position, With<crate::entities::villagers::Villager>>,
 ) {
     let mut tree_count = trees.iter().len();
     let mut occupied: Vec<Vec2> = trees
         .iter()
         .map(|(p, r, &m)| tree_base(p, r, m).xz())
-        .chain(characters.iter().map(|p| p.xz()))
+        .chain(villagers.iter().map(|p| p.xz()))
         .collect();
 
     for (position, rotation, &maturity, state, mut timer) in &mut parents {
@@ -282,7 +230,7 @@ fn disperse_seeds(
             let spot = parent + Vec2::from_angle(angle) * rng.random_range(SEED_DISTANCE);
             if spot_is_free(&map, spot, occupied.iter().copied()) {
                 debug!("sapling dropped at {spot} ({} trees)", tree_count + 1);
-                spawn_tree(&mut commands, &assets, spot, Maturity(0.0));
+                spawn_tree(&mut commands, spot, Maturity(0.0));
                 occupied.push(spot);
                 tree_count += 1;
                 break;
@@ -418,7 +366,7 @@ mod tests {
 
     #[test]
     fn spot_is_free_respects_edge_margin_and_spacing() {
-        let map = MapConfig::from_ron("(size: 20.0, characters: [], trees: [])").unwrap();
+        let map = MapConfig::from_ron("(size: 20.0, villagers: [], trees: [])").unwrap();
         let inner = map.half_extent() - EDGE_MARGIN;
 
         assert!(spot_is_free(&map, Vec2::ZERO, []));

@@ -14,10 +14,10 @@ use crate::sim::is_headless;
 pub enum Layer {
     #[default]
     Default,
-    Character,
-    /// Standing and falling trees: solid, characters steer around them.
+    Villager,
+    /// Standing and falling trees: solid, villagers steer around them.
     Obstacle,
-    /// Logs lying on the ground: characters climb over them rather than around, so they
+    /// Logs lying on the ground: villagers climb over them rather than around, so they
     /// collide with nothing and are only ever found by spatial queries.
     Log,
     /// A log being dragged: passes through everything, it's held by a joint instead.
@@ -27,21 +27,21 @@ pub enum Layer {
     Critter,
 }
 
-pub fn character_layers() -> CollisionLayers {
+pub fn villager_layers() -> CollisionLayers {
     CollisionLayers::new(
-        Layer::Character,
-        [Layer::Character, Layer::Obstacle, Layer::Critter],
+        Layer::Villager,
+        [Layer::Villager, Layer::Obstacle, Layer::Critter],
     )
 }
 
 pub fn obstacle_layers() -> CollisionLayers {
-    CollisionLayers::new(Layer::Obstacle, [Layer::Character, Layer::Critter])
+    CollisionLayers::new(Layer::Obstacle, [Layer::Villager, Layer::Critter])
 }
 
 pub fn critter_layers() -> CollisionLayers {
     CollisionLayers::new(
         Layer::Critter,
-        [Layer::Critter, Layer::Character, Layer::Obstacle],
+        [Layer::Critter, Layer::Villager, Layer::Obstacle],
     )
 }
 
@@ -53,7 +53,7 @@ pub fn carried_layers() -> CollisionLayers {
     CollisionLayers::new(Layer::Carried, LayerMask::NONE)
 }
 
-/// What a walking character looks ahead for and swerves around: everything it can't walk over
+/// What a walking villager looks ahead for and swerves around: everything it can't walk over
 /// or simply push out of the way.
 pub fn steer_mask() -> LayerMask {
     let mut mask = LayerMask::ALL;
@@ -79,14 +79,12 @@ impl Plugin for GamePhysicsPlugin {
             .build()
             // Nothing moves fast enough to tunnel.
             .disable::<CcdPlugin>()
-            // Characters never stand still long enough to sleep.
+            // Villagers never stand still long enough to sleep.
             .disable::<IslandSleepingPlugin>()
             // Bodies are driven by velocity, never by forces or accelerations.
             .disable::<ForcePlugin>()
             // Every collider sits directly on its body; none are child entities.
             .disable::<ColliderTransformPlugin>()
-            // Colliders are primitives, never generated from meshes.
-            .disable::<ColliderCachePlugin>()
             // Spatial queries go through the `SpatialQuery` param, not caster components.
             .disable::<SpatialQueryPlugin>()
             // The only joint is the rope (a `DistanceJoint`).
@@ -145,16 +143,16 @@ mod tests {
 
     #[test]
     fn logs_are_walked_over_and_trees_are_not() {
-        assert!(character_layers().interacts_with(obstacle_layers()));
-        assert!(character_layers().interacts_with(character_layers()));
-        assert!(!character_layers().interacts_with(log_layers()));
-        assert!(!character_layers().interacts_with(carried_layers()));
+        assert!(villager_layers().interacts_with(obstacle_layers()));
+        assert!(villager_layers().interacts_with(villager_layers()));
+        assert!(!villager_layers().interacts_with(log_layers()));
+        assert!(!villager_layers().interacts_with(carried_layers()));
     }
 
     #[test]
     fn critters_bump_into_trees_and_people() {
         assert!(critter_layers().interacts_with(obstacle_layers()));
-        assert!(critter_layers().interacts_with(character_layers()));
+        assert!(critter_layers().interacts_with(villager_layers()));
         assert!(critter_layers().interacts_with(critter_layers()));
         assert!(!critter_layers().interacts_with(log_layers()));
         assert!(!steer_mask().has_all(Layer::Critter));
@@ -165,7 +163,7 @@ mod tests {
         let mask = steer_mask();
         assert!(!mask.has_all(Layer::Log));
         assert!(mask.has_all(Layer::Obstacle));
-        assert!(mask.has_all(Layer::Character));
+        assert!(mask.has_all(Layer::Villager));
         assert!(mask.has_all(Layer::Carried));
     }
 }

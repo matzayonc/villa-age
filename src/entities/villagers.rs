@@ -1,36 +1,31 @@
-//! Placeholder 3D characters: they chop the nearest tree, drag the log back home, repeat.
+//! Placeholder 3D villagers: they chop the nearest tree, drag the log back home, repeat.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use rand::RngExt;
 
 use crate::GameRng;
+use crate::entities::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 use crate::history::{Action, ActionLog};
 use crate::map::MapConfig;
-use crate::physics::{Layer, character_layers, steer_mask};
+use crate::physics::{Layer, steer_mask, villager_layers};
 use crate::sim::SimSet;
-use crate::trees::{Maturity, TRUNK_RADIUS, TreeState, max_health, tree_base};
 
-/// Marker for character entities.
+/// Marker for villager entities.
 #[derive(Component)]
 #[require(Task, Heading, ActionLog, Strength, Speed, Climbing)]
-pub struct Character;
+pub struct Villager;
 
-/// Whether the character is on top of a log (its capsule overlaps one). Refreshed every frame
+/// Whether the villager is on top of a log (its capsule overlaps one). Refreshed every frame
 /// by [`climb_logs`].
 #[derive(Component, Default, Clone, Copy, Debug, PartialEq)]
 pub struct Climbing(pub bool);
 
-/// The character's visual, a child of its body so it can rise over a log without moving the
-/// physics body (which the rope to a hauled log is anchored to).
-#[derive(Component)]
-struct CharacterMesh;
-
-/// How hard a character chops: a multiplier on the base chop rate, rolled at spawn.
+/// How hard a villager chops: a multiplier on the base chop rate, rolled at spawn.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct Strength(pub f32);
 
-/// How fast a character walks: a multiplier on the base move speed, rolled at spawn.
+/// How fast a villager walks: a multiplier on the base move speed, rolled at spawn.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct Speed(pub f32);
 
@@ -46,12 +41,12 @@ impl Default for Speed {
     }
 }
 
-/// The direction the character is turned toward, smoothed over time. The transform's rotation is
+/// The direction the villager is turned toward, smoothed over time. The transform's rotation is
 /// derived from this every frame (plus any animation on top).
 #[derive(Component, Default)]
 pub struct Heading(Quat);
 
-/// Where the character spawned and hauls logs back to.
+/// Where the villager spawned and hauls logs back to.
 #[derive(Component)]
 pub struct Home(pub Vec3);
 
@@ -73,117 +68,82 @@ impl Default for Task {
 
 /// World units per second at `Speed(1.0)`.
 const MOVE_SPEED: f32 = 3.0;
-/// Spawn-time roll for each character's [`Strength`] and [`Speed`] multipliers.
+/// Spawn-time roll for each villager's [`Strength`] and [`Speed`] multipliers.
 pub const STAT_RANGE: std::ops::RangeInclusive<f32> = 0.7..=1.3;
-/// Radians per second a character can turn.
+/// Radians per second a villager can turn.
 const TURN_SPEED: f32 = 5.0;
-/// How close (in XZ) a character gets to a tree's base before stopping.
+/// How close (in XZ) a villager gets to a tree's base before stopping.
 const ARRIVE_DISTANCE: f32 = TRUNK_RADIUS + RADIUS + 0.2;
-/// A character stopped at `ARRIVE_DISTANCE` still counts as arrived within this much extra, so
+/// A villager stopped at `ARRIVE_DISTANCE` still counts as arrived within this much extra, so
 /// rounding in a moving tree's base position or a nudge from physics doesn't flicker it back to
 /// walking.
 const ARRIVE_SLACK: f32 = 0.05;
-/// How close to home a character gets before dropping the log.
+/// How close to home a villager gets before dropping the log.
 const DROP_DISTANCE: f32 = 0.3;
 /// Tree health removed per second while chopping at `Strength(1.0)`.
 const CHOP_RATE: f32 = 1.0;
-/// Chop swing animation: swings per second and lean angle in radians.
-const SWING_SPEED: f32 = 8.0;
-const SWING_ANGLE: f32 = 0.25;
-/// Maximum length of the rope between a hauling character and the base of its log. Equal to the
-/// distance at which the character stopped to chop, so grabbing doesn't move the log.
+/// Maximum length of the rope between a hauling villager and the base of its log. Equal to the
+/// distance at which the villager stopped to chop, so grabbing doesn't move the log.
 const ROPE_LENGTH: f32 = ARRIVE_DISTANCE;
 /// Standing trees below this maturity are left to grow.
 const HARVEST_MATURITY: f32 = 0.6;
 /// Walking speed multiplier while climbing over a log.
 const CLIMB_SPEED_FACTOR: f32 = 0.35;
-/// How much a character's visual rises while on top of a log (the log's radius).
-const CLIMB_HEIGHT: f32 = TRUNK_RADIUS;
 /// Steering: how far ahead to look for obstacles, and how hard to swerve around them.
 const LOOKAHEAD: f32 = 2.5;
 const AVOID_STRENGTH: f32 = 1.5;
 
-const RADIUS: f32 = 0.4;
-const HEIGHT: f32 = 1.0;
+/// The body capsule.
+pub const RADIUS: f32 = 0.4;
+pub const HEIGHT: f32 = 1.0;
 /// Height of the capsule's center when it stands on the ground.
 const GROUND_Y: f32 = HEIGHT / 2.0 + RADIUS;
-/// Character colors, cycled by spawn index.
-const COLORS: [Color; 5] = [
-    Color::srgb(0.85, 0.25, 0.2),
-    Color::srgb(0.2, 0.45, 0.9),
-    Color::srgb(0.95, 0.8, 0.2),
-    Color::srgb(0.6, 0.3, 0.8),
-    Color::srgb(0.2, 0.8, 0.75),
-];
 
-pub struct CharactersPlugin;
+pub struct VillagersPlugin;
 
-impl Plugin for CharactersPlugin {
+impl Plugin for VillagersPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_characters)
+        app.add_systems(Startup, spawn_villagers)
             // Everything that moves a body runs at the physics rate, on the physics components.
             .add_systems(
                 FixedUpdate,
                 (climb_logs, gather, haul, face_heading)
                     .chain()
-                    .in_set(SimSet::Characters),
-            )
-            // Visuals run per frame.
-            .add_systems(Update, animate_character_meshes.in_set(SimSet::Characters));
+                    .in_set(SimSet::Villagers),
+            );
     }
 }
 
-/// Spawns a character at each of the map's spawn points, each with its own rolled stats.
-fn spawn_characters(
-    mut commands: Commands,
-    map: Res<MapConfig>,
-    mut rng: ResMut<GameRng>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mesh = meshes.add(Capsule3d::new(RADIUS, HEIGHT));
-
-    for (i, &(x, z)) in map.characters.iter().enumerate() {
+/// Spawns a villager at each of the map's spawn points, each with its own rolled stats.
+fn spawn_villagers(mut commands: Commands, map: Res<MapConfig>, mut rng: ResMut<GameRng>) {
+    for (i, &(x, z)) in map.villagers.iter().enumerate() {
         let position = Vec3::new(x, GROUND_Y, z);
-        let color = COLORS[i % COLORS.len()];
         let strength = Strength(rng.0.random_range(STAT_RANGE));
         let speed = Speed(rng.0.random_range(STAT_RANGE));
-        debug!("character {} spawned with {strength:?} {speed:?}", i + 1);
-        commands
-            .spawn((
-                Character,
-                Name::new(format!("Character {}", i + 1)),
-                Home(position),
-                strength,
-                speed,
-                Transform::from_translation(position),
-                // Bodies start with their physics pose set explicitly (see `physics.rs`).
-                Position(position),
-                Rotation::IDENTITY,
-                // The body moves at the physics rate; the transform is smoothed between steps.
-                TransformInterpolation,
-                Visibility::default(),
-                RigidBody::Dynamic,
-                Collider::capsule(RADIUS, HEIGHT),
-                // Rotation is driven by `Heading`, not physics.
-                LockedAxes::ROTATION_LOCKED.lock_translation_y(),
-                character_layers(),
-                Mass(80.0),
-            ))
-            .with_child((
-                CharacterMesh,
-                // To use a real model instead of the capsule, replace `Mesh3d`/`MeshMaterial3d`
-                // with `SceneRoot(asset_server.load("character.glb#Scene0"))`.
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: color,
-                    ..default()
-                })),
-            ));
+        debug!("villager {} spawned with {strength:?} {speed:?}", i + 1);
+        commands.spawn((
+            Villager,
+            Name::new(format!("Villager {}", i + 1)),
+            Home(position),
+            strength,
+            speed,
+            Transform::from_translation(position),
+            // Bodies start with their physics pose set explicitly (see `physics.rs`).
+            Position(position),
+            Rotation::IDENTITY,
+            // The body moves at the physics rate; the transform is smoothed between steps.
+            TransformInterpolation,
+            RigidBody::Dynamic,
+            Collider::capsule(RADIUS, HEIGHT),
+            // Rotation is driven by `Heading`, not physics.
+            LockedAxes::ROTATION_LOCKED.lock_translation_y(),
+            villager_layers(),
+            Mass(80.0),
+        ));
     }
 }
 
-/// The physics-facing parts of a character that walking needs. Gameplay reads and writes the
+/// The physics-facing parts of a villager that walking needs. Gameplay reads and writes the
 /// physics pose (`Position`/`Rotation`); the `Transform` is render-only and follows it.
 #[derive(bevy::ecs::query::QueryData)]
 #[query_data(mutable)]
@@ -236,7 +196,7 @@ impl WalkerItem<'_, '_> {
         false
     }
 
-    /// Local obstacle avoidance: casts this character's shape along `desired` and, if something is
+    /// Local obstacle avoidance: casts this villager's shape along `desired` and, if something is
     /// in the way, blends in a sideways push along the obstacle's surface.
     fn steer(&self, spatial: &SpatialQuery, desired: Vec3, ignore: Option<Entity>) -> Vec3 {
         let Ok(direction) = Dir3::new(desired) else {
@@ -266,7 +226,7 @@ impl WalkerItem<'_, '_> {
     }
 }
 
-/// What a character knows about a tree when deciding whether to go for it.
+/// What a villager knows about a tree when deciding whether to go for it.
 struct TreeInfo<'a> {
     entity: Entity,
     /// Where it touches the ground, in XZ.
@@ -294,7 +254,7 @@ impl<'a> From<TreeQueryItem<'a>> for TreeInfo<'a> {
     }
 }
 
-/// How attractive a tree is to a character standing at `pos`: lower is better, `None` means it is
+/// How attractive a tree is to a villager standing at `pos`: lower is better, `None` means it is
 /// not a valid target. This is the place to add smarter rules (yield, competition, distance from home...).
 fn tree_priority(pos: Vec2, tree: &TreeInfo) -> Option<f32> {
     let distance = tree.base.distance_squared(pos);
@@ -305,7 +265,7 @@ fn tree_priority(pos: Vec2, tree: &TreeInfo) -> Option<f32> {
     }
 }
 
-/// The tree a character at `pos` should go for, if any.
+/// The tree a villager at `pos` should go for, if any.
 fn choose_tree<'a>(
     pos: Vec2,
     trees: impl IntoIterator<Item = TreeInfo<'a>>,
@@ -317,12 +277,12 @@ fn choose_tree<'a>(
         .map(|(_, tree)| tree)
 }
 
-/// Notes which characters are standing on a log.
+/// Notes which villagers are standing on a log.
 fn climb_logs(
     spatial: SpatialQuery,
-    mut characters: Query<(&Position, &Collider, &mut Climbing), With<Character>>,
+    mut villagers: Query<(&Position, &Collider, &mut Climbing), With<Villager>>,
 ) {
-    for (position, collider, mut climbing) in &mut characters {
+    for (position, collider, mut climbing) in &mut villagers {
         let on_log = !spatial
             .shape_intersections(
                 collider,
@@ -337,43 +297,16 @@ fn climb_logs(
     }
 }
 
-/// Per-frame visuals on the character's mesh (never on the body, whose pose is physics'): it
-/// rises onto a log while climbing and swings in a chopping motion while chopping.
-fn animate_character_meshes(
-    time: Res<Time>,
-    characters: Query<(&Climbing, &ActionLog, &Children), With<Character>>,
-    mut meshes: Query<&mut Transform, (With<CharacterMesh>, Without<Character>)>,
-) {
-    let swing = (time.elapsed_secs() * SWING_SPEED).sin().max(0.0) * SWING_ANGLE;
-    for (climbing, log, children) in &characters {
-        let lift = if climbing.0 { CLIMB_HEIGHT } else { 0.0 };
-        let chopping = log
-            .current()
-            .is_some_and(|entry| matches!(entry.action, Action::Chop { .. }));
-        let rotation = if chopping {
-            Quat::from_rotation_x(-swing)
-        } else {
-            Quat::IDENTITY
-        };
-        for &child in children {
-            if let Ok(mut mesh) = meshes.get_mut(child) {
-                mesh.translation.y = lift;
-                mesh.rotation = rotation;
-            }
-        }
-    }
-}
-
-/// Walks each gathering character to its chosen tree, chops it, and picks it up once fallen.
+/// Walks each gathering villager to its chosen tree, chops it, and picks it up once fallen.
 fn gather(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
-    mut trees: Query<(Entity, &Position, &Rotation, &mut TreeState, &Maturity), Without<Character>>,
-    mut characters: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Character>>,
+    mut trees: Query<(Entity, &Position, &Rotation, &mut TreeState, &Maturity), Without<Villager>>,
+    mut villagers: Query<(Walker, &Strength, &mut Task, &mut ActionLog), With<Villager>>,
 ) {
     let now = time.elapsed_secs();
-    for (mut walker, strength, mut task, mut log) in &mut characters {
+    for (mut walker, strength, mut task, mut log) in &mut villagers {
         let Task::Gather { target: current } = &mut *task else {
             continue;
         };
@@ -429,7 +362,7 @@ fn gather(
                 TreeState::Fallen => {
                     *state = TreeState::Carried(walker.entity);
                     log.record(now, Action::Haul { tree });
-                    // A slack rope from the character (held at log height) to the log's base: the
+                    // A slack rope from the villager (held at log height) to the log's base: the
                     // log is only pulled once the rope is taut, so grabbing doesn't move it.
                     let hand = Vec3::Y * (log_base.y - walker.position.y);
                     let slack = ROPE_LENGTH.max(target.distance(pos));
@@ -448,25 +381,25 @@ fn gather(
     }
 }
 
-/// Points the body the way the character is heading. Rotation is locked in physics, so this is
+/// Points the body the way the villager is heading. Rotation is locked in physics, so this is
 /// the only thing that turns it. (Kept out of the walking systems: their spatial queries read
 /// every body's rotation, which can't be borrowed mutably at the same time.)
-fn face_heading(mut characters: Query<(&Heading, &mut Rotation), Changed<Heading>>) {
-    for (heading, mut rotation) in &mut characters {
+fn face_heading(mut villagers: Query<(&Heading, &mut Rotation), Changed<Heading>>) {
+    for (heading, mut rotation) in &mut villagers {
         rotation.0 = heading.0;
     }
 }
 
-/// Drags the carried tree behind the character back home, then lets go of it there.
+/// Drags the carried tree behind the villager back home, then lets go of it there.
 fn haul(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
-    mut trees: Query<&mut TreeState, Without<Character>>,
-    mut characters: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Character>>,
+    mut trees: Query<&mut TreeState, Without<Villager>>,
+    mut villagers: Query<(Walker, &mut Task, &Home, &mut ActionLog), With<Villager>>,
 ) {
     let now = time.elapsed_secs();
-    for (mut walker, mut task, home, mut log) in &mut characters {
+    for (mut walker, mut task, home, mut log) in &mut villagers {
         let Task::Haul { tree, rope } = *task else {
             continue;
         };

@@ -4,10 +4,11 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use villa_age::characters::{Character, STAT_RANGE, Speed, Strength};
+use villa_age::entities::carrots::{Carrot, MAX_CARROTS};
+use villa_age::entities::rabbits::{Appetite, Breeding, MAX_RABBITS, Rabbit};
+use villa_age::entities::trees::{MAX_TREES, Maturity, TRUNK_RADIUS, Tree, TreeState, tree_base};
+use villa_age::entities::villagers::{Climbing, STAT_RANGE, Speed, Strength, Villager};
 use villa_age::history::{Action, ActionLog, Entry};
-use villa_age::rabbits::{Breeding, MAX_RABBITS, Rabbit};
-use villa_age::trees::{MAX_TREES, Maturity, TRUNK_RADIUS, Tree, TreeState, tree_base};
 use villa_age::{MapConfig, RunConfig, build_app};
 
 /// Builds a headless app on the default map and steps it for `sim_seconds` of simulated time.
@@ -55,7 +56,7 @@ fn snapshot(app: &mut App) -> Vec<[f32; 3]> {
         .collect();
     points.extend(
         world
-            .query_filtered::<&Position, With<Character>>()
+            .query_filtered::<&Position, With<Villager>>()
             .iter(world)
             .map(|p| p.to_array()),
     );
@@ -64,7 +65,7 @@ fn snapshot(app: &mut App) -> Vec<[f32; 3]> {
 }
 
 #[test]
-fn characters_deliver_logs() {
+fn villagers_deliver_logs() {
     let mut app = run_headless(1, 45.0);
     let delivered = count_state(&mut app, |s| matches!(s, TreeState::Delivered));
     assert!(
@@ -73,12 +74,12 @@ fn characters_deliver_logs() {
     );
 }
 
-/// Mature trees left alone drop saplings. No characters on this map, so regrowth can't lose a
+/// Mature trees left alone drop saplings. No villagers on this map, so regrowth can't lose a
 /// race against the loggers.
 #[test]
 fn forest_regrows_within_cap() {
     let map = MapConfig::from_ron(
-        "(size: 30.0, characters: [], trees: [
+        "(size: 30.0, villagers: [], trees: [
             (pos: (-6.0, -6.0), maturity: 1.0), (pos: (6.0, -6.0), maturity: 1.0),
             (pos: (-6.0, 6.0), maturity: 1.0), (pos: (6.0, 6.0), maturity: 1.0),
         ])",
@@ -121,7 +122,7 @@ fn custom_map_spawns_what_it_lists() {
     let map = MapConfig::from_ron(
         r#"(
             size: 20.0,
-            characters: [(1.0, 2.0), (-3.0, -4.0)],
+            villagers: [(1.0, 2.0), (-3.0, -4.0)],
             trees: [
                 (pos: (5.0, 5.0), maturity: 1.0),
                 (pos: (-6.0, 7.0), maturity: 0.5),
@@ -140,13 +141,13 @@ fn custom_map_spawns_what_it_lists() {
 
     assert_eq!(tree_count(&mut app), 3);
     let world = app.world_mut();
-    let mut characters: Vec<[f32; 2]> = world
-        .query_filtered::<&Position, With<Character>>()
+    let mut villagers: Vec<[f32; 2]> = world
+        .query_filtered::<&Position, With<Villager>>()
         .iter(world)
         .map(|p| p.xz().to_array())
         .collect();
-    characters.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(characters, [[-3.0, -4.0], [1.0, 2.0]]);
+    villagers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(villagers, [[-3.0, -4.0], [1.0, 2.0]]);
 
     let mut trees: Vec<[f32; 2]> = world
         .query_filtered::<(&Position, &Rotation, &Maturity), With<Tree>>()
@@ -157,12 +158,12 @@ fn custom_map_spawns_what_it_lists() {
     assert_eq!(trees, [[-6.0, 7.0], [5.0, 5.0], [8.0, -8.0]]);
 }
 
-/// One character, one mature tree next to it: the character should walk over, chop it down, wait
+/// One villager, one mature tree next to it: the villager should walk over, chop it down, wait
 /// for it to fall, drag it home and drop it — in that order, with nothing else in between.
 #[test]
-fn character_runs_through_the_gathering_cycle() {
+fn villager_runs_through_the_gathering_cycle() {
     let map = MapConfig::from_ron(
-        "(size: 20.0, characters: [(0.0, 0.0)], trees: [(pos: (3.0, 0.0), maturity: 1.0)])",
+        "(size: 20.0, villagers: [(0.0, 0.0)], trees: [(pos: (3.0, 0.0), maturity: 1.0)])",
     )
     .unwrap();
     let mut app = build_app(&RunConfig {
@@ -178,7 +179,7 @@ fn character_runs_through_the_gathering_cycle() {
         .single(world)
         .unwrap();
     let (log, strength, speed) = world
-        .query_filtered::<(&ActionLog, &Strength, &Speed), With<Character>>()
+        .query_filtered::<(&ActionLog, &Strength, &Speed), With<Villager>>()
         .single(world)
         .unwrap();
     let actions: Vec<Action> = log.iter().map(|e| e.action).collect();
@@ -220,12 +221,12 @@ fn character_runs_through_the_gathering_cycle() {
     assert!(base.xz().length() < 3.0, "log left at {base}");
 }
 
-/// Runs one character toward one mature tree at `(8, 0)`, optionally with a delivered log lying
-/// across the path at `x = 4`. Returns the seconds spent walking before the first chop and the
-/// highest the character stood along the way.
-fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
+/// Runs one villager toward one mature tree at `(8, 0)`, optionally with a delivered log lying
+/// across the path at `x = 4`. Returns the seconds spent walking before the first chop and
+/// whether the villager was ever climbing a log along the way.
+fn walk_to_tree(seed: u64, with_log: bool) -> (f32, bool) {
     let map = MapConfig::from_ron(
-        "(size: 20.0, characters: [(0.0, 0.0)], trees: [
+        "(size: 20.0, villagers: [(0.0, 0.0)], trees: [
             (pos: (8.0, 0.0), maturity: 1.0),
             (pos: (4.0, 0.0), maturity: 0.5),
         ])",
@@ -240,7 +241,7 @@ fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
     app.update();
 
     // Turn the sapling at x = 4 (too young to be a target) into a full-size log lying along Z
-    // across the character's path, or move it out of the way entirely.
+    // across the villager's path, or move it out of the way entirely.
     let world = app.world_mut();
     let (mut state, mut position, mut rotation, _) = world
         .query_filtered::<(&mut TreeState, &mut Position, &mut Rotation, &Maturity), With<Tree>>()
@@ -256,35 +257,28 @@ fn walk_to_tree(seed: u64, with_log: bool) -> (f32, f32) {
     }
 
     let step_secs = app.world().resource::<RunConfig>().step as f32;
-    let mut max_y = f32::MIN;
+    let mut climbed = false;
     for _ in 0..(10.0 / step_secs) as u32 {
         app.update();
         let world = app.world_mut();
-        let (position, children, log) = world
-            .query_filtered::<(&Position, &Children, &ActionLog), With<Character>>()
+        let (climbing, log) = world
+            .query_filtered::<(&Climbing, &ActionLog), With<Villager>>()
             .single(world)
             .unwrap();
         let entries: Vec<Entry> = log.iter().copied().collect();
         if matches!(entries.last().unwrap().action, Action::Chop { .. }) {
             assert_eq!(entries.len(), 2, "unexpected detour: {entries:?}");
-            return (entries[1].at - entries[0].at, max_y);
+            return (entries[1].at - entries[0].at, climbed);
         }
-        // The visual is a child of the body; it's what rises over a log.
-        let body_y = position.y;
-        let lift = children
-            .iter()
-            .filter_map(|child| world.get::<Transform>(child))
-            .map(|t| t.translation.y)
-            .fold(0.0, f32::max);
-        max_y = max_y.max(body_y + lift);
+        climbed |= climbing.0;
     }
-    panic!("character never reached the tree (with_log = {with_log})");
+    panic!("villager never reached the tree (with_log = {with_log})");
 }
 
 #[test]
-fn characters_climb_over_logs_slowly() {
-    let (clear_time, clear_y) = walk_to_tree(5, false);
-    let (log_time, log_y) = walk_to_tree(5, true);
+fn villagers_climb_over_logs_slowly() {
+    let (clear_time, climbed_clear) = walk_to_tree(5, false);
+    let (log_time, climbed_log) = walk_to_tree(5, true);
 
     assert!(
         log_time > clear_time + 0.3,
@@ -294,20 +288,14 @@ fn characters_climb_over_logs_slowly() {
         log_time < clear_time + 3.0,
         "climb took too long: {log_time}s"
     );
-    assert!(
-        log_y > clear_y + 0.1,
-        "character never rose over the log: {log_y} vs {clear_y}"
-    );
-
-    // Back on the ground once past it.
-    let ground = clear_y;
-    assert!(ground > 0.0);
+    assert!(climbed_log, "villager never climbed the log");
+    assert!(!climbed_clear, "villager climbed with no log in the way");
 }
 
-/// Seconds a character may sit still while it's supposed to be walking or hauling.
+/// Seconds a villager may sit still while it's supposed to be walking or hauling.
 const STALL_LIMIT: f32 = 5.0;
 
-/// Nobody should freeze mid-walk: logs pile up around homes and characters cross them, and a
+/// Nobody should freeze mid-walk: logs pile up around homes and villagers cross them, and a
 /// hauled log must never hold its hauler in place.
 #[test]
 fn nobody_gets_stuck() {
@@ -317,7 +305,7 @@ fn nobody_gets_stuck() {
         ..RunConfig::default()
     });
     let step = app.world().resource::<RunConfig>().step as f32;
-    // Where each character was last seen moving (or doing something stationary), and when.
+    // Where each villager was last seen moving (or doing something stationary), and when.
     let mut last_moved: HashMap<Entity, (Vec2, f32)> = HashMap::new();
 
     for frame in 0..(120.0 / step) as u32 {
@@ -325,7 +313,7 @@ fn nobody_gets_stuck() {
         let now = frame as f32 * step;
         let world = app.world_mut();
         for (entity, position, log) in world
-            .query_filtered::<(Entity, &Position, &ActionLog), With<Character>>()
+            .query_filtered::<(Entity, &Position, &ActionLog), With<Villager>>()
             .iter(world)
         {
             let pos = position.xz();
@@ -351,7 +339,7 @@ fn nobody_gets_stuck() {
 fn stats(app: &mut App) -> Vec<(f32, f32)> {
     let world = app.world_mut();
     let mut stats: Vec<(f32, f32)> = world
-        .query_filtered::<(&Strength, &Speed), With<Character>>()
+        .query_filtered::<(&Strength, &Speed), With<Villager>>()
         .iter(world)
         .map(|(s, v)| (s.0, v.0))
         .collect();
@@ -360,7 +348,7 @@ fn stats(app: &mut App) -> Vec<(f32, f32)> {
 }
 
 #[test]
-fn character_stats_are_rolled_in_range_and_seeded() {
+fn villager_stats_are_rolled_in_range_and_seeded() {
     let mut a = build_app(&RunConfig {
         headless: true,
         seed: 3,
@@ -368,7 +356,7 @@ fn character_stats_are_rolled_in_range_and_seeded() {
     });
     a.update();
     let sa = stats(&mut a);
-    assert_eq!(sa.len(), MapConfig::default().characters.len());
+    assert_eq!(sa.len(), MapConfig::default().villagers.len());
     for &(strength, speed) in &sa {
         assert!(STAT_RANGE.contains(&strength), "strength {strength}");
         assert!(STAT_RANGE.contains(&speed), "speed {speed}");
@@ -376,7 +364,7 @@ fn character_stats_are_rolled_in_range_and_seeded() {
     let strengths: Vec<f32> = sa.iter().map(|s| s.0).collect();
     assert!(
         strengths.windows(2).any(|w| w[0] != w[1]),
-        "every character rolled the same strength: {strengths:?}"
+        "every villager rolled the same strength: {strengths:?}"
     );
 
     let mut b = build_app(&RunConfig {
@@ -403,7 +391,7 @@ fn character_stats_are_rolled_in_range_and_seeded() {
 #[test]
 fn map_rejects_out_of_bounds_tree() {
     let err = MapConfig::from_ron(
-        "(size: 20.0, characters: [], trees: [(pos: (50.0, 0.0), maturity: 1.0)])",
+        "(size: 20.0, villagers: [], trees: [(pos: (50.0, 0.0), maturity: 1.0)])",
     )
     .unwrap_err();
     assert!(err.contains("tree 0"), "unexpected error: {err}");
@@ -457,9 +445,11 @@ fn rabbits_hop_about_and_stay_on_the_map() {
             if velocity.0 == Vec3::ZERO {
                 resting_steps += 1;
             }
-            let (distance, last) = travelled.get_mut(&entity).unwrap();
-            *distance += last.distance(position.xz());
-            *last = position.xz();
+            // Kits born along the way haven't had the whole minute to cover ground.
+            if let Some((distance, last)) = travelled.get_mut(&entity) {
+                *distance += last.distance(position.xz());
+                *last = position.xz();
+            }
         }
     }
     // Hops are short bursts: most of the time is spent sitting.
@@ -480,7 +470,7 @@ fn rabbits_hop_about_and_stay_on_the_map() {
 #[test]
 fn rabbits_breed_up_to_the_cap() {
     let map = MapConfig::from_ron(
-        "(size: 20.0, characters: [], trees: [], rabbits: [(-3.0, 0.0), (3.0, 0.0), (0.0, 3.0), (0.0, -3.0)])",
+        "(size: 20.0, villagers: [], trees: [], rabbits: [(-3.0, 0.0), (3.0, 0.0), (0.0, 3.0), (0.0, -3.0)])",
     )
     .unwrap();
     let initial = map.rabbits.len();
@@ -522,7 +512,102 @@ fn rabbits_breed_up_to_the_cap() {
     assert!(count <= MAX_RABBITS, "rabbit cap exceeded: {count}");
 }
 
-/// Load test: 1 000 characters among 10 000 trees. Ignored by default because it takes seconds
+fn carrot_count(app: &mut App) -> usize {
+    app.world_mut()
+        .query_filtered::<(), With<Carrot>>()
+        .iter(app.world())
+        .count()
+}
+
+/// Carrots sprout at random spots over time, clear of the edge, and never past the cap.
+#[test]
+fn carrots_sprout_within_cap() {
+    let map = MapConfig::from_ron("(size: 20.0, villagers: [], trees: [])").unwrap();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 5,
+        map,
+        ..RunConfig::default()
+    });
+    app.update();
+    assert_eq!(carrot_count(&mut app), 0, "carrots should sprout over time");
+
+    step(&mut app, 60.0);
+    let world = app.world_mut();
+    let spots: Vec<Vec2> = world
+        .query_filtered::<&Transform, With<Carrot>>()
+        .iter(world)
+        .map(|t| t.translation.xz())
+        .collect();
+    assert!(
+        spots.len() >= 3,
+        "only {} carrots after a minute",
+        spots.len()
+    );
+    for spot in &spots {
+        assert!(
+            spot.abs().max_element() < 10.0,
+            "carrot off the map at {spot}"
+        );
+    }
+    assert!(
+        spots
+            .iter()
+            .any(|a| spots.iter().any(|b| a.distance(*b) > 5.0)),
+        "carrots all sprouted in one place: {spots:?}"
+    );
+
+    step(&mut app, 600.0);
+    let count = carrot_count(&mut app);
+    assert_eq!(
+        count, MAX_CARROTS,
+        "with nobody eating, carrots should fill up to the cap"
+    );
+}
+
+/// A hungry rabbit hops to a carrot in sight and eats it.
+#[test]
+fn rabbits_eat_carrots() {
+    let map = MapConfig::from_ron(
+        "(size: 20.0, villagers: [], trees: [], rabbits: [(0.0, 0.0), (5.0, 5.0)])",
+    )
+    .unwrap();
+    let mut app = build_app(&RunConfig {
+        headless: true,
+        seed: 6,
+        map,
+        ..RunConfig::default()
+    });
+    let step_secs = app.world().resource::<RunConfig>().step as f32;
+    let mut sprouted = 0;
+    let mut eaten = 0;
+    let mut last = 0;
+    for _ in 0..(300.0 / step_secs) as u32 {
+        app.update();
+        let count = carrot_count(&mut app);
+        if count > last {
+            sprouted += count - last;
+        } else {
+            eaten += last - count;
+        }
+        last = count;
+    }
+    assert!(sprouted > eaten, "sprouted {sprouted}");
+    assert!(
+        eaten >= 2,
+        "rabbits ate only {eaten} of {sprouted} carrots in 5 minutes"
+    );
+
+    // A rabbit that has eaten is full for a while.
+    let world = app.world_mut();
+    let appetites: Vec<Appetite> = world.query::<&Appetite>().iter(world).copied().collect();
+    assert!(
+        appetites.iter().any(|a| matches!(a, Appetite::Full { .. })),
+        "no rabbit is full after eating"
+    );
+}
+
+/// Load test: 1 000 villagers among 10 000 trees. Ignored by default because it takes seconds
 /// even in release; run with `cargo test --release --test simulation heavy -- --ignored --nocapture`
 /// to get the timing report.
 #[test]
@@ -533,10 +618,10 @@ fn heavy_world_keeps_stepping() {
 
     const TREES_PER_SIDE: usize = 100;
     const TREE_SPACING: f32 = 3.0;
-    const CHARACTERS: usize = 1_000;
+    const VILLAGERS: usize = 1_000;
     const SIM_SECONDS: f32 = 30.0;
 
-    // Trees on a square grid; characters at the centres of a subset of the cells, so each sits
+    // Trees on a square grid; villagers at the centres of a subset of the cells, so each sits
     // on the diagonal between four trees and never inside a trunk.
     let origin = -(TREES_PER_SIDE as f32 - 1.0) * TREE_SPACING / 2.0;
     let trees: Vec<TreeSpec> = (0..TREES_PER_SIDE * TREES_PER_SIDE)
@@ -548,12 +633,12 @@ fn heavy_world_keeps_stepping() {
             }
         })
         .collect();
-    let chars_per_side = (CHARACTERS as f32).sqrt().ceil() as usize;
+    let chars_per_side = (VILLAGERS as f32).sqrt().ceil() as usize;
     let cell_centre = |k: usize| {
         let cell = k * (TREES_PER_SIDE - 1) / chars_per_side;
         origin + (cell as f32 + 0.5) * TREE_SPACING
     };
-    let characters: Vec<(f32, f32)> = (0..CHARACTERS)
+    let villagers: Vec<(f32, f32)> = (0..VILLAGERS)
         .map(|i| {
             (
                 cell_centre(i % chars_per_side),
@@ -564,7 +649,7 @@ fn heavy_world_keeps_stepping() {
     let map = MapConfig {
         size: TREES_PER_SIDE as f32 * TREE_SPACING + 8.0,
         texture: None,
-        characters,
+        villagers,
         trees,
         rabbits: vec![],
     };
@@ -593,7 +678,7 @@ fn heavy_world_keeps_stepping() {
     let trees = tree_count(&mut app);
     let chars = app
         .world_mut()
-        .query_filtered::<(), With<Character>>()
+        .query_filtered::<(), With<Villager>>()
         .iter(app.world())
         .count();
     let delivered = count_state(&mut app, |s| matches!(s, TreeState::Delivered));
@@ -611,7 +696,7 @@ fn heavy_world_keeps_stepping() {
 
     let per_frame = run / frames;
     eprintln!(
-        "heavy world: {chars} characters, {trees} trees\n  \
+        "heavy world: {chars} villagers, {trees} trees\n  \
          build app        {build:>9.2?}\n  \
          first frame      {first_frame:>9.2?}  (startup systems + spawning)\n  \
          {frames} frames      {run:>9.2?}  ({per_frame:.2?}/frame, {:.1}x realtime)\n  \
@@ -619,7 +704,7 @@ fn heavy_world_keeps_stepping() {
         SIM_SECONDS / run.as_secs_f32(),
     );
 
-    assert_eq!(chars, CHARACTERS);
+    assert_eq!(chars, VILLAGERS);
     assert_eq!(trees, TREES_PER_SIDE * TREES_PER_SIDE);
     assert!(delivered > 0, "nobody delivered a log in {SIM_SECONDS}s");
 }
